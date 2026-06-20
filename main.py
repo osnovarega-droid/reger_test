@@ -43,6 +43,11 @@ LAST_NAMES = [
     "Smirnov", "Ivanov", "Petrov", "Sokolov", "Volkov", "Kuznetsov", "Popov",
     "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
 ]
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 12
+PASSWORD_UPPERCASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+PASSWORD_LOWERCASE = "abcdefghijklmnopqrstuvwxyz"
+PASSWORD_DIGITS = "0123456789"
 VISUAL_AUTOMATION_TIMEOUT = 60
 SIGNUP_TITLE_WORDS = ["создание", "создан", "учет", "учёт", "записи", "майкрософт", "microsoft", "account"]
 
@@ -242,6 +247,19 @@ def generate_outlook_email():
     last_name = random.choice(LAST_NAMES).lower()
     return f"{first_name}_{last_name}{digits}@outlook.com"
 
+def generate_password():
+    password_length = random.randint(PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH)
+    required_characters = [
+        random.choice(PASSWORD_UPPERCASE),
+        random.choice(PASSWORD_LOWERCASE),
+        random.choice(PASSWORD_DIGITS),
+    ]
+    allowed_characters = PASSWORD_UPPERCASE + PASSWORD_LOWERCASE + PASSWORD_DIGITS
+    required_characters.extend(
+        random.choice(allowed_characters) for _ in range(password_length - len(required_characters))
+    )
+    random.shuffle(required_characters)
+    return "".join(required_characters)
 
 def get_window_handles_for_pid(target_pid):
     if os.name != "nt" or not target_pid:
@@ -561,7 +579,29 @@ def automate_signup_page(status_callback=None, edge_pid=None):
     pyautogui.moveTo(next_button_point["x"], next_button_point["y"], duration=0.2)
     pyautogui.click(clicks=1)
     log("Start reger: кнопка Далее нажата по координатам синей кнопки.")
+    time.sleep(2)
+    password = generate_password()
+    copy_text_to_clipboard(password)
+    pyautogui.hotkey("ctrl", "v")
+    log(
+        "Start reger: через 2 секунды сгенерирован пароль "
+        f"длиной {len(password)} символов (A-Z, a-z, 0-9) и вставлен через Ctrl+V."
+    )
 
+    time.sleep(2)
+    password_next_button_point = find_blue_button_point(pyautogui)
+    if not password_next_button_point:
+        password_next_button_point = fallback_point(pyautogui, 0.50, 0.665)
+        log("Start reger: после ввода пароля синяя кнопка на скриншоте не найдена, использую резервные координаты.")
+    else:
+        log(
+            "Start reger: через 2 секунды после ввода пароля на скриншоте найдена синяя кнопка "
+            f"({int(password_next_button_point['x'])}, {int(password_next_button_point['y'])}); навожу мышь и нажимаю."
+        )
+
+    pyautogui.moveTo(password_next_button_point["x"], password_next_button_point["y"], duration=0.2)
+    pyautogui.click(clicks=1)
+    log("Start reger: кнопка после ввода пароля нажата по координатам синей кнопки.")
     return email
 
 
@@ -598,7 +638,7 @@ class RegerRunner(QObject):
 
             self.status.emit(f"Start reger: найден Microsoft Edge PID {edge_pid}. Продолжаю регистрацию в этом окне.")
             email = automate_signup_page(self.status.emit, edge_pid)
-            self.status.emit(f"Start reger: введена электронная почта {email} и нажата кнопка Далее.")
+            self.status.emit(f"Start reger: введена электронная почта {email}, затем сгенерирован пароль и нажата следующая синяя кнопка.")
             wait_until_edge_closed(edge_pid)
             self.finished.emit(True, f'Start reger: окно "{EDGE_WINDOW_TITLE}" закрыто.')
         except Exception as exc:
