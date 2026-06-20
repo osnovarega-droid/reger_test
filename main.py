@@ -209,9 +209,9 @@ def wait_for_edge_pid(output_file, known_pids=None, launched_pid=None, timeout=E
             window_new_pids = sorted(new_pids & window_pids)
             if window_new_pids:
                 return window_new_pids[0]
-        
 
-   
+
+
         reusable_pids = sorted(current_pids & window_pids)
         if reusable_pids:
             return reusable_pids[0]
@@ -376,6 +376,90 @@ def find_text_point_on_screen(pyautogui_module, pytesseract_module, words, confi
     return None
 
 
+
+
+def is_microsoft_button_blue(red, green, blue):
+    return 0 <= red <= 45 and 90 <= green <= 170 and 160 <= blue <= 235 and blue > red + 110 and green > red + 60
+
+
+def find_blue_button_point(pyautogui_module, min_width=120, min_height=28):
+    screenshot = pyautogui_module.screenshot()
+    width, height = screenshot.size
+    rect = get_foreground_window_rect()
+
+    if rect:
+        left = max(0, min(width - 1, rect["left"]))
+        top = max(0, min(height - 1, rect["top"]))
+        right = max(left + 1, min(width, rect["right"]))
+        bottom = max(top + 1, min(height, rect["bottom"]))
+    else:
+        left, top, right, bottom = 0, 0, width, height
+
+    image = screenshot.convert("RGB")
+    pixel_access = image.load()
+    scan_width = right - left
+    scan_height = bottom - top
+    blue_mask = bytearray(scan_width * scan_height)
+
+    for y in range(top, bottom):
+        row_offset = (y - top) * scan_width
+        for x in range(left, right):
+            red, green, blue = pixel_access[x, y]
+            if is_microsoft_button_blue(red, green, blue):
+                blue_mask[row_offset + (x - left)] = 1
+
+    visited = bytearray(len(blue_mask))
+    candidates = []
+    for local_y in range(scan_height):
+        for local_x in range(scan_width):
+            start_index = local_y * scan_width + local_x
+            if not blue_mask[start_index] or visited[start_index]:
+                continue
+
+            stack = [(local_x, local_y)]
+            visited[start_index] = 1
+            min_x = max_x = local_x
+            min_y = max_y = local_y
+            area = 0
+
+            while stack:
+                current_x, current_y = stack.pop()
+                area += 1
+                min_x = min(min_x, current_x)
+                max_x = max(max_x, current_x)
+                min_y = min(min_y, current_y)
+                max_y = max(max_y, current_y)
+
+                for next_x, next_y in (
+                    (current_x + 1, current_y),
+                    (current_x - 1, current_y),
+                    (current_x, current_y + 1),
+                    (current_x, current_y - 1),
+                ):
+                    if next_x < 0 or next_x >= scan_width or next_y < 0 or next_y >= scan_height:
+                        continue
+                    next_index = next_y * scan_width + next_x
+                    if blue_mask[next_index] and not visited[next_index]:
+                        visited[next_index] = 1
+                        stack.append((next_x, next_y))
+
+            component_width = max_x - min_x + 1
+            component_height = max_y - min_y + 1
+            if component_width >= min_width and component_height >= min_height:
+                candidates.append({
+                    "x": left + min_x + component_width / 2,
+                    "y": top + min_y + component_height / 2,
+                    "width": component_width,
+                    "height": component_height,
+                    "area": area,
+                })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item["area"], item["width"] * item["height"]), reverse=True)
+    return candidates[0]
+
 def fallback_point(pyautogui_module, relative_x, relative_y):
     rect = get_foreground_window_rect()
     if not rect:
@@ -402,7 +486,7 @@ def copy_text_to_clipboard(text):
     clipboard.setText(text)
 
 def automate_signup_page(status_callback=None, edge_pid=None):
-    
+
 
     def log(message):
         if status_callback:
@@ -460,12 +544,23 @@ def automate_signup_page(status_callback=None, edge_pid=None):
     email = generate_outlook_email()
     copy_text_to_clipboard(email)
     pyautogui.hotkey("ctrl", "v")
-    log(f"Start reger: сгенерированный email {email} вставлен через Ctrl+V.")  
+    log(f"Start reger: сгенерированный email {email} вставлен через Ctrl+V.")
 
 
-    pyautogui.press("tab")
-    pyautogui.press("enter")
-    log("Start reger: после вставки email нажаты Tab и Enter.")
+    time.sleep(0.8)
+    next_button_point = find_blue_button_point(pyautogui)
+    if not next_button_point:
+        next_button_point = fallback_point(pyautogui, 0.50, 0.665)
+        log("Start reger: синяя кнопка на скриншоте не найдена, использую резервные координаты кнопки Далее.")
+    else:
+        log(
+            "Start reger: на скриншоте найдена синяя кнопка "
+            f"({int(next_button_point['x'])}, {int(next_button_point['y'])}); навожу мышь и нажимаю."
+        )
+
+    pyautogui.moveTo(next_button_point["x"], next_button_point["y"], duration=0.2)
+    pyautogui.click(clicks=1)
+    log("Start reger: кнопка Далее нажата по координатам синей кнопки.")
 
     return email
 
