@@ -251,7 +251,9 @@ def wait_until_edge_closed(port, edge_pid=None):
 
 def generate_outlook_email():
     digits = random.randint(100, 99999)
-    return f"{random.choice(FIRST_NAMES)}_{random.choice(LAST_NAMES)}{digits}@outlook.com"
+    first_name = random.choice(FIRST_NAMES).lower()
+    last_name = random.choice(LAST_NAMES).lower()
+    return f"{first_name}_{last_name}{digits}@outlook.com"
 
 
 def wait_for_debugger(port, timeout=20):
@@ -311,6 +313,7 @@ def automate_signup_page(port=CDP_PORT):
 
     js = """
         const email = __EMAIL__;
+        const REQUIRED_TITLE_TEXT = 'Создание учетной записи Майкрософт';
         const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
         const visible = (el) => {
             if (!el) return false;
@@ -318,44 +321,77 @@ def automate_signup_page(port=CDP_PORT):
             const style = window.getComputedStyle(el);
             return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
         };
-        const waitUntil = async (predicate, timeout = 30000) => {
+        const textOf = (el) => (el?.innerText || el?.textContent || el?.value || el?.getAttribute('aria-label') || '').trim();
+        const waitUntil = async (predicate, timeout = 45000, errorMessage = 'Страница не загрузила нужный элемент за отведённое время.') => {
             const started = Date.now();
             while (Date.now() - started < timeout) {
                 const value = predicate();
                 if (value) return value;
                 await sleep(250);
             }
-            throw new Error('Страница не загрузила нужный элемент за отведённое время.');
+            throw new Error(errorMessage);
         };
+        const findByText = (text) => [...document.querySelectorAll('button, a, div, span, h1, h2, h3, label, [role="button"]')]
+            .find(el => visible(el) && textOf(el).includes(text));
+        const findEmailInput = () => [...document.querySelectorAll('input, textarea')].find(el => {
+            if (!visible(el) || el.disabled || el.readOnly) return false;
+            const meta = [el.type, el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.getAttribute('data-testid')].join(' ');
+            return /email|membername|login|электрон/i.test(meta) || textOf(el).includes('Электронная почта');
+        });
         const clickCenter = async (el) => {
             el.scrollIntoView({block: 'center', inline: 'center'});
             await sleep(250);
-            el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
-            el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-            el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+            const rect = el.getBoundingClientRect();
+            const options = {bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2};
+            el.dispatchEvent(new MouseEvent('mouseover', options));
+            el.dispatchEvent(new MouseEvent('mousemove', options));
+            el.dispatchEvent(new MouseEvent('mousedown', options));
+            el.dispatchEvent(new MouseEvent('mouseup', options));
             el.click();
             await sleep(500);
         };
-
+        const pasteText = async (el, text) => {
+            el.focus();
+            el.value = '';
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            await sleep(200);
+            try {
+                await navigator.clipboard.writeText(text);
+                const pasteEvent = new ClipboardEvent('paste', {
+                    bubbles: true,
+                    cancelable: true,
+                    clipboardData: new DataTransfer(),
+                });
+                pasteEvent.clipboardData.setData('text/plain', text);
+                el.dispatchEvent(pasteEvent);
+            } catch (_) {
+                document.execCommand('insertText', false, text);
+            }
+            if (el.value !== text) {
+                el.value = text;
+                el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertFromPaste', data: text}));
+            }
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+        };
         (async () => {
             await waitUntil(() => document.readyState === 'complete');
-            await sleep(1500);
-            const microsoft = await waitUntil(() => [...document.querySelectorAll('div, span, img')].find(el => visible(el) && (el.innerText || el.alt || '').includes('Microsoft')));
-            await clickCenter(microsoft);
-            const emailInput = await waitUntil(() => [...document.querySelectorAll('input')].find(el => visible(el) && (el.type === 'email' || /email|membername|login|электрон/i.test(el.name + ' ' + el.id + ' ' + el.placeholder + ' ' + el.getAttribute('aria-label')))));
+            const title = await waitUntil(
+                () => findByText(REQUIRED_TITLE_TEXT),
+                45000,
+                `Не появилась надпись "${REQUIRED_TITLE_TEXT}".`
+            );
+            await clickCenter(title);
+            const emailLabel = await waitUntil(
+                () => findByText('Электронная почта') || findEmailInput(),
+                30000,
+                'Не найдена надпись или поле "Электронная почта".'
+            );
+            await clickCenter(emailLabel);
+            const emailInput = await waitUntil(findEmailInput, 15000, 'Не найдено поле ввода электронной почты.');
             await clickCenter(emailInput);
-            emailInput.focus();
-            emailInput.value = '';
-            emailInput.dispatchEvent(new Event('input', {bubbles: true}));
-            await sleep(300);
-            for (const char of email) {
-                emailInput.value += char;
-                emailInput.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: char}));
-                await sleep(25 + Math.random() * 35);
-            }
-            emailInput.dispatchEvent(new Event('change', {bubbles: true}));
+            await pasteText(emailInput, email);
             await sleep(800);
-            const nextButton = await waitUntil(() => [...document.querySelectorAll('button, input[type="submit"]')].find(el => visible(el) && /далее|next/i.test(el.innerText || el.value || el.getAttribute('aria-label') || '')));
+            const nextButton = await waitUntil(() => [...document.querySelectorAll('button, input[type="submit"], [role="button"]')].find(el => visible(el) && /далее|next/i.test(textOf(el))), 30000, 'Не найдена кнопка "Далее".');
             await clickCenter(nextButton);
             done({ok: true, email});
         })().catch(error => done({ok: false, error: error.message, email}));
@@ -366,7 +402,7 @@ def automate_signup_page(port=CDP_PORT):
         result = cdp.call("Runtime.evaluate", {
             "expression": wrapper,
             "awaitPromise": True,
-            "timeout": 45000,
+            "timeout": 60000,
             "userGesture": True,
             "returnByValue": True,
         })
