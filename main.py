@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
-    QAbstractItemView,    
+    QAbstractItemView,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -55,6 +55,13 @@ PASSWORD_LOWERCASE = "abcdefghijklmnopqrstuvwxyz"
 PASSWORD_DIGITS = "0123456789"
 VISUAL_AUTOMATION_TIMEOUT = 60
 SIGNUP_TITLE_WORDS = ["создание", "создан", "учет", "учёт", "записи", "майкрософт", "microsoft", "account"]
+DAY_FIELD_WORDS = ["день", "day"]
+MONTH_FIELD_WORDS = ["месяц", "month"]
+YEAR_FIELD_WORDS = ["год", "year"]
+BIRTH_DAY_MIN = 1
+BIRTH_DAY_MAX = 18
+BIRTH_YEAR_MIN = 1980
+BIRTH_YEAR_MAX = 2008
 
 EDGE_INITIAL_CHECK_DELAY = 5
 EDGE_MONITOR_INTERVAL = 1
@@ -255,7 +262,7 @@ def generate_outlook_email():
 def save_account_credentials(email, password):
     with open(LOGPASS_FILE, "a", encoding="utf-8") as file:
         file.write(f"{email}:{password}\n")
-        
+
 def generate_password():
     password_length = random.randint(PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH)
     required_characters = [
@@ -403,6 +410,112 @@ def find_text_point_on_screen(pyautogui_module, pytesseract_module, words, confi
     return None
 
 
+def get_text_points_on_screen(pyautogui_module, pytesseract_module, confidence=35):
+    if pyautogui_module is None or pytesseract_module is None:
+        return []
+
+    screenshot = pyautogui_module.screenshot()
+    try:
+        data = pytesseract_module.image_to_data(
+            screenshot,
+            lang="rus+eng",
+            output_type=pytesseract_module.Output.DICT,
+            config="--psm 6",
+        )
+    except (pytesseract_module.TesseractNotFoundError, RuntimeError, OSError):
+        return []
+
+    points = []
+    count = len(data.get("text", []))
+    for index in range(count):
+        raw_text = (data["text"][index] or "").strip()
+        if not raw_text:
+            continue
+        try:
+            item_confidence = float(data.get("conf", [0])[index])
+        except (TypeError, ValueError):
+            item_confidence = 0
+        if item_confidence < confidence:
+            continue
+        points.append({
+            "x": data["left"][index] + data["width"][index] / 2,
+            "y": data["top"][index] + data["height"][index] / 2,
+            "text": raw_text,
+            "normalized": normalize_ocr_text(raw_text),
+            "confidence": item_confidence,
+        })
+    return points
+
+
+def click_text_or_fallback(pyautogui_module, pytesseract_module, words, fallback_relative_x, fallback_relative_y, log, description):
+    point = find_text_point_on_screen(pyautogui_module, pytesseract_module, words) if pytesseract_module is not None else None
+    if point:
+        log(f"Start reger: на скриншоте найдены координаты поля {description} ({int(point['x'])}, {int(point['y'])}); нажимаю.")
+    else:
+        point = fallback_point(pyautogui_module, fallback_relative_x, fallback_relative_y)
+        log(f"Start reger: координаты поля {description} через OCR не найдены, использую резервную точку ({int(point['x'])}, {int(point['y'])}).")
+    pyautogui_module.moveTo(point["x"], point["y"], duration=0.2)
+    pyautogui_module.click(clicks=1)
+    return point
+
+
+def click_random_birth_day(pyautogui_module, pytesseract_module, day_field_point, log):
+    selected_day = random.randint(BIRTH_DAY_MIN, BIRTH_DAY_MAX)
+    candidates = []
+    if pytesseract_module is not None:
+        for point in get_text_points_on_screen(pyautogui_module, pytesseract_module):
+            if point["normalized"] != str(selected_day):
+                continue
+            if day_field_point and point["y"] <= day_field_point["y"] + 8:
+                continue
+            candidates.append(point)
+
+    if candidates:
+        candidates.sort(key=lambda item: item["y"])
+        point = candidates[0]
+        log(f"Start reger: на скриншоте найдены координаты дня {selected_day} ({int(point['x'])}, {int(point['y'])}); нажимаю.")
+    else:
+        if day_field_point:
+            point = {"x": day_field_point["x"], "y": day_field_point["y"] + 45 + (selected_day - 1) * 28}
+        else:
+            point = fallback_point(pyautogui_module, 0.36, 0.58)
+        log(f"Start reger: день {selected_day} через OCR не найден, нажимаю резервные координаты ({int(point['x'])}, {int(point['y'])}).")
+
+    pyautogui_module.moveTo(point["x"], point["y"], duration=0.2)
+    pyautogui_module.click(clicks=1)
+    return selected_day
+
+
+def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
+    time.sleep(2)
+    day_point = click_text_or_fallback(pyautogui_module, pytesseract_module, DAY_FIELD_WORDS, 0.37, 0.72, log, "День")
+    time.sleep(1)
+    selected_day = click_random_birth_day(pyautogui_module, pytesseract_module, day_point, log)
+
+    time.sleep(0.5)
+    click_text_or_fallback(pyautogui_module, pytesseract_module, MONTH_FIELD_WORDS, 0.49, 0.72, log, "Месяц")
+    pyautogui_module.press("enter")
+    log("Start reger: поле Месяц нажато, затем нажата клавиша Enter для выбора месяца.")
+
+    time.sleep(0.5)
+    click_text_or_fallback(pyautogui_module, pytesseract_module, YEAR_FIELD_WORDS, 0.62, 0.72, log, "Год")
+    selected_year = random.randint(BIRTH_YEAR_MIN, BIRTH_YEAR_MAX)
+    pyautogui_module.write(str(selected_year), interval=0.03)
+    log(f"Start reger: в поле Год введён случайный год {selected_year}.")
+
+    time.sleep(0.5)
+    final_button_point = find_blue_button_point(pyautogui_module)
+    if not final_button_point:
+        final_button_point = fallback_point(pyautogui_module, 0.50, 0.965)
+        log("Start reger: финальная синяя кнопка на скриншоте не найдена, использую резервные координаты.")
+    else:
+        log(
+            "Start reger: на финальном скриншоте найдена синяя кнопка "
+            f"({int(final_button_point['x'])}, {int(final_button_point['y'])}); нажимаю."
+        )
+    pyautogui_module.moveTo(final_button_point["x"], final_button_point["y"], duration=0.2)
+    pyautogui_module.click(clicks=1)
+    log(f"Start reger: дата рождения выбрана: день {selected_day}, год {selected_year}; финальная синяя кнопка нажата.")
 
 
 def is_microsoft_button_blue(red, green, blue):
@@ -610,9 +723,12 @@ def automate_signup_page(status_callback=None, edge_pid=None):
 
     pyautogui.moveTo(password_next_button_point["x"], password_next_button_point["y"], duration=0.2)
     pyautogui.click(clicks=1)
+    log("Start reger: кнопка после ввода пароля нажата по координатам синей кнопки.")
+
+    fill_birth_date_after_password(pyautogui, pytesseract, log)
+
     save_account_credentials(email, password)
     log(f"Start reger: аккаунт сохранён в {LOGPASS_FILE.name} в формате mail:password.")
-    log("Start reger: кнопка после ввода пароля нажата по координатам синей кнопки.")
     return email, password
 
 
