@@ -1,3 +1,4 @@
+import ctypes
 import json
 import os
 import random
@@ -48,6 +49,7 @@ CDP_PORT = 9222
 PAGE_AUTOMATION_TIMEOUT = 45
 EDGE_INITIAL_CHECK_DELAY = 5
 EDGE_MONITOR_INTERVAL = 1
+EDGE_WINDOW_TITLE = "Microsoft Edge"
 
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -99,28 +101,61 @@ def is_debugger_available(port):
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
 
-def ensure_edge_started(process, output_file):
-    time.sleep(EDGE_INITIAL_CHECK_DELAY)
+def get_window_titles():
+    if os.name != "nt":
+        return []
 
-    if process.poll() is None:
+    titles = []
+    user32 = ctypes.windll.user32
+
+    def enum_handler(hwnd, _):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        title = buffer.value.strip()
+        if title:
+            titles.append(title)
         return True
 
+    enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    user32.EnumWindows(enum_windows_proc(enum_handler), 0)
+    return titles
 
 
-    exit_code = process.poll()
+def is_edge_window_open(window_title=EDGE_WINDOW_TITLE):
+    expected_title = window_title.lower()
+    return any(expected_title in title.lower() for title in get_window_titles())
+
+
+def wait_for_edge_window(output_file, timeout=EDGE_INITIAL_CHECK_DELAY):
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        if is_edge_window_open():
+            return True
+        time.sleep(0.25)
+
+
+
+ 
     details = read_process_output(output_file)
     message = (
-        "Microsoft Edge не остался запущенным после "
-        f"{EDGE_INITIAL_CHECK_DELAY} сек. "
-        f"Стартовый процесс завершился с кодом {exit_code}."
+        f'Окно с названием "{EDGE_WINDOW_TITLE}" не найдено за {timeout} сек. '
+        "Проверка теперь выполняется по названию окна, а не по PID процесса."
     )
     if details:
         message += f" Вывод Microsoft Edge: {details}"
     raise RuntimeError(message)
 
 
-def wait_until_edge_closed(process, port):
-    while process.poll() is None or is_debugger_available(port):
+def wait_until_edge_closed(port):
+    while is_edge_window_open() or is_debugger_available(port):
         time.sleep(EDGE_MONITOR_INTERVAL)
 
 
@@ -281,17 +316,17 @@ class RegerRunner(QObject):
                     build_edge_args(self.edge_path, port, user_data_dir),
                     **get_edge_popen_kwargs(stderr_target),
                 )
-                self.status.emit(f"Start reger: Microsoft Edge запущен в режиме InPrivate, PID процесса: {process.pid}. Проверю окно через {EDGE_INITIAL_CHECK_DELAY} сек.")
-                ensure_edge_started(process, output_file)
+                self.status.emit(f'Start reger: Microsoft Edge запущен в режиме InPrivate. Проверю окно "{EDGE_WINDOW_TITLE}" через {EDGE_INITIAL_CHECK_DELAY} сек.')
+                wait_for_edge_window(output_file)
 
-            self.status.emit(f"Start reger: окно Microsoft Edge InPrivate открыто, PID {process.pid}. Продолжаю регистрацию.")
+            self.status.emit(f'Start reger: найдено окно "{EDGE_WINDOW_TITLE}". Продолжаю регистрацию.')
             email = automate_signup_page(port)
             self.status.emit(f"Start reger: введена электронная почта {email} и нажата кнопка Далее.")
-            wait_until_edge_closed(process, port)
-            self.finished.emit(True, f"Start reger: окно Microsoft Edge закрыто или процесс PID {process.pid} пропал.")
+            wait_until_edge_closed(port)
+            self.finished.emit(True, f'Start reger: окно "{EDGE_WINDOW_TITLE}" закрыто.')
         except Exception as exc:
             if process and process.poll() is None:
-                self.status.emit(f"Start reger: Microsoft Edge PID {process.pid} оставлен открытым.")
+                self.status.emit(f'Start reger: окно "{EDGE_WINDOW_TITLE}" оставлено открытым.')
             self.finished.emit(False, f"Ошибка Start reger: {exc}")
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
