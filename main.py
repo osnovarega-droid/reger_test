@@ -48,6 +48,8 @@ LAST_NAMES = [
 ]
 CDP_PORT = 9222
 CHROMIUM_STARTUP_TIMEOUT = 8
+CHROMIUM_INITIAL_CHECK_DELAY = 3
+CHROMIUM_MONITOR_INTERVAL = 1
 
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -92,17 +94,32 @@ def build_chromium_args(chromium_path, port, user_data_dir):
     ]
 
 
-def ensure_chromium_started(process, output_file):
+def ensure_chromium_started(process, output_file, port):
+    time.sleep(CHROMIUM_INITIAL_CHECK_DELAY)
     deadline = time.time() + CHROMIUM_STARTUP_TIMEOUT
 
     while time.time() < deadline:
-        if process.poll() is not None:
-            details = read_process_output(output_file)
-            message = "Chromium сразу закрылся после запуска. Проверьте путь к chrome.exe и параметры запуска."
-            if details:
-                message += f" Вывод Chromium: {details}"
-            raise RuntimeError(message)
-        time.sleep(0.2)
+        if process.poll() is None:
+            return True
+
+        try:
+            wait_for_debugger(port, timeout=1)
+            return False
+        except RuntimeError:
+            pass
+
+        time.sleep(0.4)
+
+    details = read_process_output(output_file)
+    message = "Chromium закрылся после запуска или окно пропало. Проверьте путь к chrome.exe и параметры запуска."
+    if details:
+        message += f" Вывод Chromium: {details}"
+    raise RuntimeError(message)
+
+
+def wait_until_chromium_closed(process):
+    while process.poll() is None:
+        time.sleep(CHROMIUM_MONITOR_INTERVAL)
 
 
 def generate_outlook_email():
@@ -233,6 +250,7 @@ class ChromiumFinder(QObject):
 
 
 class RegerRunner(QObject):
+    status = Signal(str)
     finished = Signal(bool, str)
 
     def __init__(self, chromium_path):
@@ -251,13 +269,26 @@ class RegerRunner(QObject):
                     build_chromium_args(self.chromium_path, port, user_data_dir),
                     **get_chromium_popen_kwargs(stderr_target),
                 )
-                ensure_chromium_started(process, output_file)
+                self.status.emit(f"Start reger: Chromium запущен, PID процесса: {process.pid}. Проверю окно через {CHROMIUM_INITIAL_CHECK_DELAY} сек.")
+                pid_is_alive = ensure_chromium_started(process, output_file, port)
+
+            if pid_is_alive:
+                self.status.emit(f"Start reger: окно Chromium активно, PID {process.pid} сохранён до закрытия окна.")
+            else:
+                self.status.emit("Start reger: стартовый процесс Chromium завершился, но окно доступно через DevTools. Продолжаю работу без PID-мониторинга.")
 
             email = automate_signup_page(port)
-            self.finished.emit(True, f"Start reger: Chromium открыт в режиме инкогнито, введена почта {email} и нажата кнопка Далее.")
+            self.status.emit(f"Start reger: Chromium открыт в режиме инкогнито, введена почта {email} и нажата кнопка Далее.")
+
+            if pid_is_alive:
+                wait_until_chromium_closed(process)
+                self.finished.emit(True, f"Start reger: окно Chromium закрыто или процесс PID {process.pid} пропал.")
+            else:
+                self.finished.emit(True, "Start reger: автоматизация завершена. PID стартового процесса уже закрыт, поэтому дальнейшее закрытие окна не отслеживается.")
         except Exception as exc:
             if process and process.poll() is None:
                 process.terminate()
+                self.status.emit(f"Start reger: процесс Chromium PID {process.pid} остановлен из-за ошибки.")
             self.finished.emit(False, f"Ошибка Start reger: {exc}")
         finally:
             shutil.rmtree(user_data_dir, ignore_errors=True)
@@ -595,6 +626,7 @@ class ChromiumLauncher(QWidget):
         self.reger_worker = RegerRunner(chromium_path)
         self.reger_worker.moveToThread(self.reger_thread)
         self.reger_thread.started.connect(self.reger_worker.run)
+        self.reger_worker.status.connect(self.add_log)
         self.reger_worker.finished.connect(self.on_reger_finished)
         self.reger_worker.finished.connect(self.reger_thread.quit)
         self.reger_worker.finished.connect(self.reger_worker.deleteLater)
