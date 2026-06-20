@@ -1,8 +1,10 @@
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -44,6 +46,22 @@ LAST_NAMES = [
     "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
 ]
 CDP_PORT = 9222
+
+
+def get_chromium_popen_kwargs():
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": os.name != "nt",
+    }
+
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        )
+
+    return kwargs
 
 
 def generate_outlook_email():
@@ -181,19 +199,25 @@ class RegerRunner(QObject):
         self.chromium_path = chromium_path
 
     def run(self):
+        user_data_dir = tempfile.mkdtemp(prefix="reger-chromium-")
+
         try:
             subprocess.Popen([
                 self.chromium_path,
                 f"--remote-debugging-port={CDP_PORT}",
+                f"--user-data-dir={user_data_dir}",
                 "--incognito",
                 "--new-window",
+                "--no-default-browser-check",
                 "--no-first-run",
                 TARGET_URL,
-            ])
+            ], **get_chromium_popen_kwargs())
             email = automate_signup_page()
             self.finished.emit(True, f"Start reger: введена почта {email} и нажата кнопка Далее.")
         except Exception as exc:
             self.finished.emit(False, f"Ошибка Start reger: {exc}")
+        finally:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
 def find_chromium_auto():
