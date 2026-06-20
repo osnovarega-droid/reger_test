@@ -80,51 +80,26 @@ def read_process_output(output_file):
     return text[-1200:]
 
 
-def build_edge_args(edge_path, port, user_data_dir):
+def build_edge_args(edge_path):
     return [
         edge_path,
-
-        "--new-window",
-        f"--remote-debugging-port={port}",
-        "--remote-debugging-address=127.0.0.1",
-        "--remote-allow-origins=*",
-        f"--user-data-dir={user_data_dir}",
-        "--no-default-browser-check",
-        "--no-first-run",
-        "--disable-session-crashed-bubble",
-        "--disable-extensions",
-        "--disable-background-mode",
-        "--disable-features=Translate,OptimizationHints",
-        "--disable-dev-shm-usage",
+        "--inprivate",
         TARGET_URL,
     ]
 
 
-def ensure_edge_started(process, output_file, port):
+def ensure_edge_started(process, output_file):
     time.sleep(EDGE_INITIAL_CHECK_DELAY)
-    deadline = time.time() + EDGE_STARTUP_TIMEOUT
-    process_exited_at = None
-    while time.time() < deadline:
 
-
-        try:
-            wait_for_debugger(port, timeout=1)
-            return process.poll() is None
-        except RuntimeError:
-            if process.poll() is not None and process_exited_at is None:
-                process_exited_at = time.time()
-
-            if process_exited_at and time.time() - process_exited_at > 3:
-                break
-
-        time.sleep(0.3)
-
-    details = read_process_output(output_file)
     exit_code = process.poll()
     if exit_code is None:
-        message = "Microsoft Edge запущен, но DevTools-порт не открылся. Проверьте параметры запуска и антивирус/фаервол."
-    else:
-        message = f"Microsoft Edge завершился сразу после запуска с кодом {exit_code}. Проверьте путь к msedge.exe и параметры запуска."
+        return True
+
+    details = read_process_output(output_file)
+    message = (
+        f"Microsoft Edge завершился сразу после обычного запуска InPrivate с кодом {exit_code}. "
+        "Проверьте путь к msedge.exe."
+    )
     if details:
         message += f" Вывод Microsoft Edge: {details}"
     raise RuntimeError(message)
@@ -280,43 +255,28 @@ class RegerRunner(QObject):
         self.edge_path = edge_path
 
     def run(self):
-        user_data_dir = tempfile.mkdtemp(prefix="reger-edge-")
-        port = get_free_port()
-        output_file = Path(user_data_dir) / "edge-startup.log"
+        output_dir = tempfile.mkdtemp(prefix="reger-edge-")
+        output_file = Path(output_dir) / "edge-startup.log"
         process = None
 
         try:
             with open(output_file, "w", encoding="utf-8", errors="replace") as stderr_target:
                 process = subprocess.Popen(
-                    build_edge_args(self.edge_path, port, user_data_dir),
+                    build_edge_args(self.edge_path),
                     **get_edge_popen_kwargs(stderr_target),
                 )
-                self.status.emit(f"Start reger: Microsoft Edge запущен, PID процесса: {process.pid}. Проверю окно через {EDGE_INITIAL_CHECK_DELAY} сек.")
-                pid_is_alive = ensure_edge_started(process, output_file, port)
+                self.status.emit(f"Start reger: Microsoft Edge запущен в режиме InPrivate, PID процесса: {process.pid}. Проверю окно через {EDGE_INITIAL_CHECK_DELAY} сек.")
+                ensure_edge_started(process, output_file)
 
-            if pid_is_alive:
-                self.status.emit(f"Start reger: окно Microsoft Edge активно, PID {process.pid} сохранён до закрытия окна.")
-            else:
-                self.status.emit("Start reger: стартовый процесс Microsoft Edge завершился, но окно доступно через DevTools. Продолжаю работу без PID-мониторинга.")
-
-            email = automate_signup_page(port)
-            self.status.emit(f"Start reger: Microsoft Edge открыт в отдельном чистом профиле, введена почта {email} и нажата кнопка Далее.")
-
-            if pid_is_alive:
-                wait_until_edge_closed(process)
-                self.finished.emit(True, f"Start reger: окно Microsoft Edge закрыто или процесс PID {process.pid} пропал.")
-            else:
-                self.finished.emit(True, "Start reger: автоматизация завершена. PID стартового процесса уже закрыт, поэтому дальнейшее закрытие окна не отслеживается.")
+            self.status.emit(f"Start reger: окно Microsoft Edge InPrivate открыто, PID {process.pid} сохранён до закрытия окна.")
+            wait_until_edge_closed(process)
+            self.finished.emit(True, f"Start reger: окно Microsoft Edge закрыто или процесс PID {process.pid} пропал.")
         except Exception as exc:
             if process and process.poll() is None:
-                self.status.emit(
-                    f"Start reger: Microsoft Edge PID {process.pid} оставлен открытым, "
-                    "чтобы можно было увидеть открытую страницу и ошибку автоматизации."
-                )
+                self.status.emit(f"Start reger: Microsoft Edge PID {process.pid} оставлен открытым.")
             self.finished.emit(False, f"Ошибка Start reger: {exc}")
         finally:
-            if not process or process.poll() is not None:
-                shutil.rmtree(user_data_dir, ignore_errors=True)
+            shutil.rmtree(output_dir, ignore_errors=True)
 
 
 def get_default_edge_path():
@@ -652,7 +612,7 @@ class EdgeLauncher(QWidget):
             self.add_log(f"Путь к Microsoft Edge сохранён: {edge_path}")
 
         self.start_button.setEnabled(False)
-        self.add_log("Start reger: открываю Microsoft Edge и жду загрузку страницы.")
+        self.add_log("Start reger: открываю Microsoft Edge в режиме InPrivate.")
 
         self.reger_thread = QThread(self)
         self.reger_worker = RegerRunner(edge_path)
