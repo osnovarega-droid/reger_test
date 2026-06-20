@@ -48,15 +48,15 @@ LAST_NAMES = [
     "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
 ]
 CDP_PORT = 9222
-CHROMIUM_STARTUP_TIMEOUT = 20
-CHROMIUM_INITIAL_CHECK_DELAY = 2
-CHROMIUM_MONITOR_INTERVAL = 1
+EDGE_STARTUP_TIMEOUT = 20
+EDGE_INITIAL_CHECK_DELAY = 2
+EDGE_MONITOR_INTERVAL = 1
 
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
-def get_chromium_popen_kwargs(stderr_target=None):
+def get_edge_popen_kwargs(stderr_target=None):
     kwargs = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
@@ -79,9 +79,9 @@ def read_process_output(output_file):
     return text[-1200:]
 
 
-def build_chromium_args(chromium_path, port, user_data_dir):
+def build_edge_args(edge_path, port, user_data_dir):
     return [
-        chromium_path,
+        edge_path,
 
         "--new-window",
         f"--remote-debugging-port={port}",
@@ -100,9 +100,9 @@ def build_chromium_args(chromium_path, port, user_data_dir):
     ]
 
 
-def ensure_chromium_started(process, output_file, port):
-    time.sleep(CHROMIUM_INITIAL_CHECK_DELAY)
-    deadline = time.time() + CHROMIUM_STARTUP_TIMEOUT
+def ensure_edge_started(process, output_file, port):
+    time.sleep(EDGE_INITIAL_CHECK_DELAY)
+    deadline = time.time() + EDGE_STARTUP_TIMEOUT
     process_exited_at = None
     while time.time() < deadline:
 
@@ -122,17 +122,17 @@ def ensure_chromium_started(process, output_file, port):
     details = read_process_output(output_file)
     exit_code = process.poll()
     if exit_code is None:
-        message = "Chromium запущен, но DevTools-порт не открылся. Проверьте параметры запуска и антивирус/фаервол."
+        message = "Microsoft Edge запущен, но DevTools-порт не открылся. Проверьте параметры запуска и антивирус/фаервол."
     else:
-        message = f"Chromium завершился сразу после запуска с кодом {exit_code}. Проверьте путь к chrome.exe и параметры запуска."
+        message = f"Microsoft Edge завершился сразу после запуска с кодом {exit_code}. Проверьте путь к msedge.exe и параметры запуска."
     if details:
-        message += f" Вывод Chromium: {details}"
+        message += f" Вывод Microsoft Edge: {details}"
     raise RuntimeError(message)
 
 
-def wait_until_chromium_closed(process):
+def wait_until_edge_closed(process):
     while process.poll() is None:
-        time.sleep(CHROMIUM_MONITOR_INTERVAL)
+        time.sleep(EDGE_MONITOR_INTERVAL)
 
 
 def generate_outlook_email():
@@ -166,7 +166,7 @@ def wait_for_debugger(port, timeout=20):
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
             time.sleep(0.4)
 
-    raise RuntimeError("Не удалось подключиться к Chromium DevTools.")
+    raise RuntimeError("Не удалось подключиться к Microsoft Edge DevTools.")
 
 
 class CdpClient:
@@ -267,71 +267,69 @@ def automate_signup_page(port=CDP_PORT):
         cdp.close()
 
 
-class ChromiumFinder(QObject):
+class EdgeFinder(QObject):
     finished = Signal(str)
 
     def run(self):
-        self.finished.emit(find_chromium_auto())
+        self.finished.emit(find_edge_auto())
 
 
 class RegerRunner(QObject):
     status = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, chromium_path):
+    def __init__(self, edge_path):
         super().__init__()
-        self.chromium_path = chromium_path
+        self.edge_path = edge_path
 
     def run(self):
-        user_data_dir = tempfile.mkdtemp(prefix="reger-chromium-")
+        user_data_dir = tempfile.mkdtemp(prefix="reger-edge-")
         port = get_free_port()
-        output_file = Path(user_data_dir) / "chromium-startup.log"
+        output_file = Path(user_data_dir) / "edge-startup.log"
         process = None
 
         try:
             with open(output_file, "w", encoding="utf-8", errors="replace") as stderr_target:
                 process = subprocess.Popen(
-                    build_chromium_args(self.chromium_path, port, user_data_dir),
-                    **get_chromium_popen_kwargs(stderr_target),
+                    build_edge_args(self.edge_path, port, user_data_dir),
+                    **get_edge_popen_kwargs(stderr_target),
                 )
-                self.status.emit(f"Start reger: Chromium запущен, PID процесса: {process.pid}. Проверю окно через {CHROMIUM_INITIAL_CHECK_DELAY} сек.")
-                pid_is_alive = ensure_chromium_started(process, output_file, port)
+                self.status.emit(f"Start reger: Microsoft Edge запущен, PID процесса: {process.pid}. Проверю окно через {EDGE_INITIAL_CHECK_DELAY} сек.")
+                pid_is_alive = ensure_edge_started(process, output_file, port)
 
             if pid_is_alive:
-                self.status.emit(f"Start reger: окно Chromium активно, PID {process.pid} сохранён до закрытия окна.")
+                self.status.emit(f"Start reger: окно Microsoft Edge активно, PID {process.pid} сохранён до закрытия окна.")
             else:
-                self.status.emit("Start reger: стартовый процесс Chromium завершился, но окно доступно через DevTools. Продолжаю работу без PID-мониторинга.")
+                self.status.emit("Start reger: стартовый процесс Microsoft Edge завершился, но окно доступно через DevTools. Продолжаю работу без PID-мониторинга.")
 
             email = automate_signup_page(port)
-            self.status.emit(f"Start reger: Chromium открыт в отдельном чистом профиле, введена почта {email} и нажата кнопка Далее.")
+            self.status.emit(f"Start reger: Microsoft Edge открыт в отдельном чистом профиле, введена почта {email} и нажата кнопка Далее.")
 
             if pid_is_alive:
-                wait_until_chromium_closed(process)
-                self.finished.emit(True, f"Start reger: окно Chromium закрыто или процесс PID {process.pid} пропал.")
+                wait_until_edge_closed(process)
+                self.finished.emit(True, f"Start reger: окно Microsoft Edge закрыто или процесс PID {process.pid} пропал.")
             else:
                 self.finished.emit(True, "Start reger: автоматизация завершена. PID стартового процесса уже закрыт, поэтому дальнейшее закрытие окна не отслеживается.")
         except Exception as exc:
             if process and process.poll() is None:
                 process.terminate()
-                self.status.emit(f"Start reger: процесс Chromium PID {process.pid} остановлен из-за ошибки.")
+                self.status.emit(f"Start reger: процесс Microsoft Edge PID {process.pid} остановлен из-за ошибки.")
             self.finished.emit(False, f"Ошибка Start reger: {exc}")
         finally:
             shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
-def find_chromium_auto():
+def get_default_edge_path():
+    return r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
+
+def find_edge_auto():
     possible_paths = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Chromium\Application\chrome.exe",
-        r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
-        r"%LOCALAPPDATA%\Chromium\Application\chrome.exe",
-        r"%LOCALAPPDATA%\Chromium\chrome.exe",
-        r"%LOCALAPPDATA%\ms-playwright\chromium-*\chrome-win64\chrome.exe",
+
     ]
 
     for raw_path in possible_paths:
@@ -358,10 +356,7 @@ def find_chromium_auto():
             for file in root.rglob("*.exe"):
                 file_text = str(file).lower()
 
-                if (
-                    file.name.lower() in ["chrome.exe", "chromium.exe", "msedge.exe"]
-                    and any(browser_name in file_text for browser_name in ["chrome", "chromium", "edge"])
-                ):
+                if file.name.lower() == "msedge.exe" and "microsoft" in file_text and "edge" in file_text:
                     return str(file)
 
         except (OSError, PermissionError):
@@ -371,16 +366,16 @@ def find_chromium_auto():
 
 
 def load_config():
-    default_config = {"chromium_path": ""}
+    default_config = {"edge_path": get_default_edge_path()}
 
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as file:
                 loaded = json.load(file)
-            return {**default_config, **loaded}
+
         except (OSError, json.JSONDecodeError):
             return default_config
-
+        return {**default_config, **loaded}
     return default_config
 
 
@@ -389,27 +384,27 @@ def save_config(config):
         json.dump(config, file, indent=4, ensure_ascii=False)
 
 
-def validate_chromium_path(path_text):
+def validate_edge_path(path_text):
     path_text = path_text.strip()
 
     if not path_text:
-        return False, 'Не указано "chromium_path"'
+        return False, 'Не указано "edge_path"'
 
-    chromium_path = Path(path_text)
+    edge_path = Path(path_text)
 
-    if not chromium_path.exists():
-        return False, "Файл Chromium не найден."
+    if not edge_path.exists():
+        return False, "Файл Microsoft Edge не найден."
 
-    if not chromium_path.is_file():
+    if not edge_path.is_file():
         return False, "Указанный путь не является файлом."
 
-    if chromium_path.suffix.lower() != ".exe":
+    if edge_path.suffix.lower() != ".exe":
         return False, "Нужно выбрать .exe файл."
 
     return True, ""
 
 
-class ChromiumLauncher(QWidget):
+class EdgeLauncher(QWidget):
     def __init__(self):
         super().__init__()
 
@@ -500,13 +495,12 @@ class ChromiumLauncher(QWidget):
         card = QFrame()
         card.setObjectName("card")
 
-        label = QLabel("Путь до Chromium")
+        label = QLabel("Путь до Microsoft Edge")
         label.setObjectName("inputLabel")
 
         self.path_input = QLineEdit()
-        self.path_input.setPlaceholderText("Например: C:\\...\\chrome.exe")
-        self.path_input.setText(self.config.get("chromium_path", ""))
-
+        self.path_input.setPlaceholderText("Например: C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe")
+        self.path_input.setText(self.config.get("edge_path", ""))
         self.choose_button = QPushButton("Выбрать файл")
         self.choose_button.clicked.connect(self.choose_file)
 
@@ -581,7 +575,7 @@ class ChromiumLauncher(QWidget):
         self.logs_box.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
 
     def choose_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите Chromium .exe", "", "Executable (*.exe)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите Microsoft Edge .exe", "", "Executable (*.exe)")
         if file_path:
             self.path_input.setText(file_path)
             self.add_log("Путь выбран вручную.")
@@ -592,11 +586,11 @@ class ChromiumLauncher(QWidget):
             return
 
         self.auto_find_button.setEnabled(False)
-        self.status_label.setText("Идёт поиск Chromium...")
-        self.add_log("Запущен автоматический поиск Chromium.")
+        self.status_label.setText("Идёт поиск Microsoft Edge...")
+        self.add_log("Запущен автоматический поиск Microsoft Edge.")
 
         self.find_thread = QThread(self)
-        self.find_worker = ChromiumFinder()
+        self.find_worker = EdgeFinder()
         self.find_worker.moveToThread(self.find_thread)
         self.find_thread.started.connect(self.find_worker.run)
         self.find_worker.finished.connect(self.on_auto_find_finished)
@@ -612,24 +606,24 @@ class ChromiumLauncher(QWidget):
 
         if found_path:
             self.path_input.setText(found_path)
-            self.status_label.setText(f"Chromium найден: {found_path}")
-            self.add_log(f"Chromium найден: {found_path}")
+            self.status_label.setText(f"Microsoft Edge найден: {found_path}")
+            self.add_log(f"Microsoft Edge найден: {found_path}")
         else:
-            self.status_label.setText("Chromium не найден автоматически.")
-            self.add_log("Chromium не найден автоматически.")
+            self.status_label.setText("Microsoft Edge не найден автоматически.")
+            self.add_log("Microsoft Edge не найден автоматически.")
     def on_find_thread_finished(self):
         self.find_thread = None
         self.find_worker = None
     def save_path(self):
-        chromium_path = self.path_input.text().strip()
-        valid, error = validate_chromium_path(chromium_path)
+        edge_path = self.path_input.text().strip()
+        valid, error = validate_edge_path(edge_path)
 
         if not valid:
             self.status_label.setText(error)
             self.add_log(error)
             return
 
-        self.config["chromium_path"] = chromium_path
+        self.config["edge_path"] = edge_path
         save_config(self.config)
         self.status_label.setText("Настройки сохранены.")
         self.add_log("Настройки сохранены.")
@@ -640,18 +634,18 @@ class ChromiumLauncher(QWidget):
             return
 
         self.config = load_config()
-        chromium_path = self.config.get("chromium_path", "").strip()
-        valid, error = validate_chromium_path(chromium_path)
+        edge_path = self.config.get("edge_path", "").strip()
+        valid, error = validate_edge_path(edge_path)
 
         if not valid:
             self.add_log(error)
             return
 
         self.start_button.setEnabled(False)
-        self.add_log("Start reger: открываю Chromium и жду загрузку страницы.")
+        self.add_log("Start reger: открываю Microsoft Edge и жду загрузку страницы.")
 
         self.reger_thread = QThread(self)
-        self.reger_worker = RegerRunner(chromium_path)
+        self.reger_worker = RegerRunner(edge_path)
         self.reger_worker.moveToThread(self.reger_thread)
         self.reger_thread.started.connect(self.reger_worker.run)
         self.reger_worker.status.connect(self.add_log)
@@ -674,6 +668,6 @@ class ChromiumLauncher(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = ChromiumLauncher()
+    window = EdgeLauncher()
     window.show()
     sys.exit(app.exec())
