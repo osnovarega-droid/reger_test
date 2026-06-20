@@ -2,6 +2,7 @@ import json
 import os
 import random
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -47,7 +48,10 @@ LAST_NAMES = [
 ]
 CDP_PORT = 9222
 
-
+def get_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 def get_chromium_popen_kwargs():
     kwargs = {
         "stdin": subprocess.DEVNULL,
@@ -58,7 +62,7 @@ def get_chromium_popen_kwargs():
 
     if os.name == "nt":
         kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            subprocess.CREATE_NEW_PROCESS_GROUP
         )
 
     return kwargs
@@ -200,11 +204,12 @@ class RegerRunner(QObject):
 
     def run(self):
         user_data_dir = tempfile.mkdtemp(prefix="reger-chromium-")
-
+        port = get_free_port()
+        
         try:
-            subprocess.Popen([
+            process = subprocess.Popen([
                 self.chromium_path,
-                f"--remote-debugging-port={CDP_PORT}",
+                f"--remote-debugging-port={port}",
                 f"--user-data-dir={user_data_dir}",
                 "--incognito",
                 "--new-window",
@@ -212,7 +217,10 @@ class RegerRunner(QObject):
                 "--no-first-run",
                 TARGET_URL,
             ], **get_chromium_popen_kwargs())
-            email = automate_signup_page()
+            time.sleep(0.5)
+            if process.poll() is not None:
+                raise RuntimeError("Chromium сразу закрылся после запуска. Проверьте путь к chrome.exe и параметры запуска.")
+            email = automate_signup_page(port)
             self.finished.emit(True, f"Start reger: введена почта {email} и нажата кнопка Далее.")
         except Exception as exc:
             self.finished.emit(False, f"Ошибка Start reger: {exc}")
@@ -500,13 +508,13 @@ class ChromiumLauncher(QWidget):
         self.find_worker.finished.connect(self.on_auto_find_finished)
         self.find_worker.finished.connect(self.find_thread.quit)
         self.find_worker.finished.connect(self.find_worker.deleteLater)
+        self.find_thread.finished.connect(self.on_find_thread_finished)
         self.find_thread.finished.connect(self.find_thread.deleteLater)
         self.find_thread.start()
 
     def on_auto_find_finished(self, found_path):
         self.auto_find_button.setEnabled(True)
-        self.find_thread = None
-        self.find_worker = None
+
 
         if found_path:
             self.path_input.setText(found_path)
@@ -515,7 +523,9 @@ class ChromiumLauncher(QWidget):
         else:
             self.status_label.setText("Chromium не найден автоматически.")
             self.add_log("Chromium не найден автоматически.")
-
+    def on_find_thread_finished(self):
+        self.find_thread = None
+        self.find_worker = None
     def save_path(self):
         chromium_path = self.path_input.text().strip()
         valid, error = validate_chromium_path(chromium_path)
@@ -553,14 +563,18 @@ class ChromiumLauncher(QWidget):
         self.reger_worker.finished.connect(self.on_reger_finished)
         self.reger_worker.finished.connect(self.reger_thread.quit)
         self.reger_worker.finished.connect(self.reger_worker.deleteLater)
+        self.reger_thread.finished.connect(self.on_reger_thread_finished)
         self.reger_thread.finished.connect(self.reger_thread.deleteLater)
         self.reger_thread.start()
 
     def on_reger_finished(self, ok, message):
         self.start_button.setEnabled(True)
+        self.add_log(message)
+
+    def on_reger_thread_finished(self):
         self.reger_thread = None
         self.reger_worker = None
-        self.add_log(message)
+  
 
 
 if __name__ == "__main__":
