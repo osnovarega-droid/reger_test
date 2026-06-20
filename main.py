@@ -44,6 +44,8 @@ LAST_NAMES = [
     "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
 ]
 VISUAL_AUTOMATION_TIMEOUT = 60
+SIGNUP_TITLE_WORDS = ["создание", "создан", "учет", "учёт", "записи", "майкрософт", "microsoft", "account"]
+
 EDGE_INITIAL_CHECK_DELAY = 5
 EDGE_MONITOR_INTERVAL = 1
 EDGE_WINDOW_TITLE = "Microsoft Edge"
@@ -288,6 +290,8 @@ def load_optional_module(module_name):
     except Exception:
         return None
 
+def normalize_ocr_text(text):
+    return "".join(character for character in text.lower().replace("ё", "е") if character.isalnum())
 
 def find_text_point_on_screen(pyautogui_module, pytesseract_module, words, confidence=45):
     if pyautogui_module is None or pytesseract_module is None:
@@ -304,10 +308,11 @@ def find_text_point_on_screen(pyautogui_module, pytesseract_module, words, confi
     except (pytesseract_module.TesseractNotFoundError, RuntimeError, OSError):
         return None
 
-    normalized_words = [word.lower() for word in words]
+    normalized_words = [normalize_ocr_text(word) for word in words]
     count = len(data.get("text", []))
     for index in range(count):
-        text = (data["text"][index] or "").strip().lower()
+        raw_text = (data["text"][index] or "").strip()
+        text = normalize_ocr_text(raw_text)
         if not text:
             continue
         try:
@@ -320,7 +325,7 @@ def find_text_point_on_screen(pyautogui_module, pytesseract_module, words, confi
             return {
                 "x": data["left"][index] + data["width"][index] / 2,
                 "y": data["top"][index] + data["height"][index] / 2,
-                "text": data["text"][index],
+                "text": raw_text,
             }
     return None
 
@@ -372,18 +377,36 @@ def automate_signup_page(status_callback=None):
     time.sleep(5)
 
     title_point = None
+    title_deadline = min(deadline, time.time() + 8)
+    while pytesseract is not None and time.time() < title_deadline:
+        title_point = find_text_point_on_screen(pyautogui, pytesseract, SIGNUP_TITLE_WORDS)
+        if title_point:
+            break
+        time.sleep(0.5)
+
+    if title_point:
+        log(f"Start reger: навожу мышку на слово «{title_point['text']}» из заголовка ({round(title_point['x'])}, {round(title_point['y'])}) и кликаю.")
+        pyautogui.moveTo(title_point["x"], title_point["y"], duration=0.2)
+        pyautogui.click()
+        time.sleep(0.5)
+    else:
+        title_point = fallback_point(pyautogui, 0.50, 0.26)
+        log("Start reger: OCR не нашёл заголовок, навожу мышку в область текста «Создание учетной записи Майкрософт» и кликаю.")
+        pyautogui.moveTo(title_point["x"], title_point["y"], duration=0.2)
+        pyautogui.click()
+        time.sleep(0.5)
     email_point = None
     next_point = None
     while time.time() < deadline:
-        title_point = title_point or find_text_point_on_screen(pyautogui, pytesseract, ["создание", "account", "учет"])
+
         email_point = email_point or find_text_point_on_screen(pyautogui, pytesseract, ["электрон", "email", "почта"])
         next_point = next_point or find_text_point_on_screen(pyautogui, pytesseract, ["далее", "next"])
         if email_point or next_point:
             break
         time.sleep(0.7)
 
-    if title_point:
-        log(f"Start reger: найден текст на экране «{title_point['text']}» ({round(title_point['x'])}, {round(title_point['y'])}).")
+   
+
 
     if email_point:
         click_point = {"x": email_point["x"], "y": email_point["y"] + 36}
