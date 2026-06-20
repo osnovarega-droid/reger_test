@@ -385,10 +385,24 @@ def fallback_point(pyautogui_module, relative_x, relative_y):
         "x": rect["left"] + (rect["right"] - rect["left"]) * relative_x,
         "y": rect["top"] + (rect["bottom"] - rect["top"]) * relative_y,
     }
+def copy_text_to_clipboard(text):
+    if os.name == "nt":
+        subprocess.run(
+            ["clip"],
+            input=text,
+            text=True,
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return
 
+    clipboard = QApplication.clipboard()
+    if clipboard is None:
+        raise RuntimeError("Не удалось получить системный буфер обмена для вставки email через Ctrl+V.")
+    clipboard.setText(text)
 
 def automate_signup_page(status_callback=None, edge_pid=None):
-    email = generate_outlook_email()
+    
 
     def log(message):
         if status_callback:
@@ -431,49 +445,27 @@ def automate_signup_page(status_callback=None, edge_pid=None):
         time.sleep(0.5)
 
     if title_point:
-        log(f"Start reger: навожу мышку на слово «{title_point['text']}» из заголовка ({round(title_point['x'])}, {round(title_point['y'])}) и кликаю.")
+
         pyautogui.moveTo(title_point["x"], title_point["y"], duration=0.2)
-        pyautogui.click()
-        time.sleep(0.5)
+        pyautogui.click(clicks=1)
     else:
         title_point = fallback_point(pyautogui, 0.50, 0.26)
-        log("Start reger: OCR не нашёл заголовок, навожу мышку в область текста «Создание учетной записи Майкрософт» и кликаю.")
+
         pyautogui.moveTo(title_point["x"], title_point["y"], duration=0.2)
-        pyautogui.click()
-        time.sleep(0.5)
-    email_point = None
-    next_point = None
-    while time.time() < deadline:
+        pyautogui.click(clicks=1)
+    time.sleep(2)
+    pyautogui.press("tab")
+    log("Start reger: через 2 секунды после клика по заголовку нажата клавиша Tab.")
 
-        email_point = email_point or find_text_point_on_screen(pyautogui, pytesseract, ["электрон", "email", "почта"])
-        next_point = next_point or find_text_point_on_screen(pyautogui, pytesseract, ["далее", "next"])
-        if email_point or next_point:
-            break
-        time.sleep(0.7)
-
-   
+    email = generate_outlook_email()
+    copy_text_to_clipboard(email)
+    pyautogui.hotkey("ctrl", "v")
+    log(f"Start reger: сгенерированный email {email} вставлен через Ctrl+V.")  
 
 
-    if email_point:
-        click_point = {"x": email_point["x"], "y": email_point["y"] + 36}
-        log(f"Start reger: кликаю по координатам поля email рядом с текстом «{email_point['text']}».")
-    else:
-        click_point = fallback_point(pyautogui, 0.50, 0.42)
-        log("Start reger: OCR не нашёл подпись email, использую координаты поля по области окна.")
-
-    pyautogui.click(click_point["x"], click_point["y"])
-    pyautogui.hotkey("ctrl", "a")
-    pyautogui.write(email, interval=0.01)
-    log(f"Start reger: ввожу сгенерированный email {email}.")
-    time.sleep(0.5)
-
-    next_point = next_point or find_text_point_on_screen(pyautogui, pytesseract, ["далее", "next"])
-    if next_point:
-        log(f"Start reger: кликаю по тексту кнопки «{next_point['text']}» ({round(next_point['x'])}, {round(next_point['y'])}).")
-        pyautogui.click(next_point["x"], next_point["y"])
-    else:
-        log("Start reger: OCR не нашёл кнопку Далее, нажимаю Enter как безопасный эквивалент.")
-        pyautogui.press("enter")
+    pyautogui.press("tab")
+    pyautogui.press("enter")
+    log("Start reger: после вставки email нажаты Tab и Enter.")
 
     return email
 
