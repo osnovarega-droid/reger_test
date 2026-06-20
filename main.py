@@ -1,9 +1,19 @@
 import json
 import os
+import random
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
+from glob import glob
 from pathlib import Path
+
+try:
+    import websocket
+except ImportError:
+    websocket = None
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
@@ -25,11 +35,165 @@ CONFIG_FILE = APP_DIR / "config.json"
 TARGET_URL = "https://signup.live.com/signup"
 
 
+FIRST_NAMES = [
+    "Anton", "Ivan", "Dmitry", "Maxim", "Alex", "Nikita", "Roman", "Victor",
+    "Kirill", "Denis", "Mark", "Andrew", "Michael", "Daniel", "Sergey",
+]
+LAST_NAMES = [
+    "Smirnov", "Ivanov", "Petrov", "Sokolov", "Volkov", "Kuznetsov", "Popov",
+    "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
+]
+CDP_PORT = 9222
+
+
+def generate_outlook_email():
+    digits = random.randint(100, 99999)
+    return f"{random.choice(FIRST_NAMES)}_{random.choice(LAST_NAMES)}{digits}@outlook.com"
+
+
+def wait_for_debugger(port, timeout=20):
+    deadline = time.time() + timeout
+    url = f"http://127.0.0.1:{port}/json/list"
+
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1) as response:
+                tabs = json.loads(response.read().decode("utf-8"))
+            for tab in tabs:
+                if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
+                    return tab["webSocketDebuggerUrl"]
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            time.sleep(0.4)
+
+    raise RuntimeError("Не удалось подключиться к Chromium DevTools.")
+
+
+class CdpClient:
+    def __init__(self, ws_url):
+        if websocket is None:
+            raise RuntimeError("Установите зависимость websocket-client: py -m pip install -r requirements.txt")
+
+        self.ws = websocket.create_connection(ws_url, timeout=10)
+        self.next_id = 0
+
+    def call(self, method, params=None):
+        self.next_id += 1
+        message_id = self.next_id
+        self.ws.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
+
+        while True:
+            response = json.loads(self.ws.recv())
+            if response.get("id") == message_id:
+                if "error" in response:
+                    raise RuntimeError(response["error"].get("message", str(response["error"])))
+                return response.get("result", {})
+
+    def close(self):
+        self.ws.close()
+
+
+def automate_signup_page(port=CDP_PORT):
+    email = generate_outlook_email()
+    ws_url = wait_for_debugger(port)
+    cdp = CdpClient(ws_url)
+
+    js = """
+        const email = __EMAIL__;
+        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+        const visible = (el) => {
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const waitUntil = async (predicate, timeout = 30000) => {
+            const started = Date.now();
+            while (Date.now() - started < timeout) {
+                const value = predicate();
+                if (value) return value;
+                await sleep(250);
+            }
+            throw new Error('Страница не загрузила нужный элемент за отведённое время.');
+        };
+        const clickCenter = async (el) => {
+            el.scrollIntoView({block: 'center', inline: 'center'});
+            await sleep(250);
+            el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+            el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+            el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+            el.click();
+            await sleep(500);
+        };
+
+        (async () => {
+            await waitUntil(() => document.readyState === 'complete' || document.readyState === 'interactive');
+            await sleep(1500);
+            const microsoft = await waitUntil(() => [...document.querySelectorAll('div, span, img')].find(el => visible(el) && (el.innerText || el.alt || '').includes('Microsoft')));
+            await clickCenter(microsoft);
+            const emailInput = await waitUntil(() => [...document.querySelectorAll('input')].find(el => visible(el) && (el.type === 'email' || /email|membername|login/i.test(el.name + ' ' + el.id + ' ' + el.placeholder + ' ' + el.getAttribute('aria-label')))));
+            await clickCenter(emailInput);
+            emailInput.focus();
+            emailInput.value = '';
+            emailInput.dispatchEvent(new Event('input', {bubbles: true}));
+            await sleep(300);
+            for (const char of email) {
+                emailInput.value += char;
+                emailInput.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: char}));
+                await sleep(25 + Math.random() * 35);
+            }
+            emailInput.dispatchEvent(new Event('change', {bubbles: true}));
+            await sleep(800);
+            const nextButton = await waitUntil(() => [...document.querySelectorAll('button, input[type="submit"]')].find(el => visible(el) && /далее|next/i.test(el.innerText || el.value || el.getAttribute('aria-label') || '')));
+            await clickCenter(nextButton);
+            done({ok: true, email});
+        })().catch(error => done({ok: false, error: error.message, email}));
+    """.replace("__EMAIL__", json.dumps(email))
+
+    try:
+        wrapper = "new Promise(done => { " + js + " })"
+        result = cdp.call("Runtime.evaluate", {
+            "expression": wrapper,
+            "awaitPromise": True,
+            "timeout": 45000,
+            "userGesture": True,
+            "returnByValue": True,
+        })
+        value = result.get("result", {}).get("value", {})
+        if not value.get("ok"):
+            raise RuntimeError(value.get("error", "Неизвестная ошибка автоматизации."))
+        return value["email"]
+    finally:
+        cdp.close()
+
+
 class ChromiumFinder(QObject):
     finished = Signal(str)
 
     def run(self):
         self.finished.emit(find_chromium_auto())
+
+
+class RegerRunner(QObject):
+    finished = Signal(bool, str)
+
+    def __init__(self, chromium_path):
+        super().__init__()
+        self.chromium_path = chromium_path
+
+    def run(self):
+        try:
+            subprocess.Popen([
+                self.chromium_path,
+                f"--remote-debugging-port={CDP_PORT}",
+                "--incognito",
+                "--new-window",
+                "--no-first-run",
+                TARGET_URL,
+            ])
+            email = automate_signup_page()
+            self.finished.emit(True, f"Start reger: введена почта {email} и нажата кнопка Далее.")
+        except Exception as exc:
+            self.finished.emit(False, f"Ошибка Start reger: {exc}")
 
 
 def find_chromium_auto():
@@ -43,7 +207,7 @@ def find_chromium_auto():
 
     for raw_path in possible_paths:
         expanded = os.path.expandvars(raw_path)
-        matches = sorted(Path().glob(expanded)) if "*" in expanded else [Path(expanded)]
+        matches = [Path(match) for match in sorted(glob(expanded))] if "*" in expanded else [Path(expanded)]
         for path in matches:
             if path.exists() and path.is_file():
                 return str(path)
@@ -126,6 +290,8 @@ class ChromiumLauncher(QWidget):
         self.config = load_config()
         self.find_thread = None
         self.find_worker = None
+        self.reger_thread = None
+        self.reger_worker = None
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("sidebar")
@@ -183,40 +349,15 @@ class ChromiumLauncher(QWidget):
     def create_main_page(self):
         page = QWidget()
 
-        title = QLabel("Main")
-        title.setObjectName("pageTitle")
-
-        subtitle = QLabel("Пока здесь только запуск Reger через Chromium из config.json.")
-        subtitle.setObjectName("pageSubtitle")
-
-        card = QFrame()
-        card.setObjectName("heroCard")
-
-        start_title = QLabel("Start reger")
-        start_title.setObjectName("cardTitle")
-
-        start_text = QLabel("Откроет ссылку регистрации в Chromium, путь к которому указан в настройках.")
-        start_text.setObjectName("pageSubtitle")
-        start_text.setWordWrap(True)
-
-        self.start_button = QPushButton("▶  Start reger")
+        self.start_button = QPushButton("Start reger")
         self.start_button.setObjectName("startButton")
+        self.start_button.setFixedWidth(130)
         self.start_button.clicked.connect(self.start_reger)
 
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(28, 28, 28, 28)
-        card_layout.setSpacing(16)
-        card_layout.addWidget(start_title)
-        card_layout.addWidget(start_text)
-        card_layout.addWidget(self.start_button)
-        card_layout.addStretch()
-
         page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(40, 36, 40, 36)
-        page_layout.setSpacing(18)
-        page_layout.addWidget(title)
-        page_layout.addWidget(subtitle)
-        page_layout.addWidget(card)
+        page_layout.setContentsMargins(24, 24, 24, 24)
+        page_layout.setSpacing(0)
+        page_layout.addWidget(self.start_button, 0)
         page_layout.addStretch()
         return page
 
@@ -305,7 +446,7 @@ class ChromiumLauncher(QWidget):
             QPushButton:disabled { background-color: #1E293B; color: #64748B; }
             #saveButton { background-color: #2563EB; }
             #saveButton:hover { background-color: #1D4ED8; }
-            #startButton { background-color: #16A34A; font-size: 16px; padding: 16px 22px; }
+            #startButton { background-color: #16A34A; font-size: 14px; padding: 10px 14px; }
             #startButton:hover { background-color: #15803D; }
             #statusLabel { color: #CBD5E1; min-height: 24px; }
         """)
@@ -366,6 +507,10 @@ class ChromiumLauncher(QWidget):
         self.add_log("Настройки сохранены.")
 
     def start_reger(self):
+        if self.reger_thread and self.reger_thread.isRunning():
+            self.add_log("Start reger уже выполняется.")
+            return
+
         self.config = load_config()
         chromium_path = self.config.get("chromium_path", "").strip()
         valid, error = validate_chromium_path(chromium_path)
@@ -374,11 +519,24 @@ class ChromiumLauncher(QWidget):
             self.add_log(error)
             return
 
-        try:
-            subprocess.Popen([chromium_path, "--incognito", "--new-window", "--no-first-run", TARGET_URL])
-            self.add_log("Start reger: Chromium открыт.")
-        except Exception as exc:
-            self.add_log(f"Не удалось запустить Chromium: {exc}")
+        self.start_button.setEnabled(False)
+        self.add_log("Start reger: открываю Chromium и жду загрузку страницы.")
+
+        self.reger_thread = QThread(self)
+        self.reger_worker = RegerRunner(chromium_path)
+        self.reger_worker.moveToThread(self.reger_thread)
+        self.reger_thread.started.connect(self.reger_worker.run)
+        self.reger_worker.finished.connect(self.on_reger_finished)
+        self.reger_worker.finished.connect(self.reger_thread.quit)
+        self.reger_worker.finished.connect(self.reger_worker.deleteLater)
+        self.reger_thread.finished.connect(self.reger_thread.deleteLater)
+        self.reger_thread.start()
+
+    def on_reger_finished(self, ok, message):
+        self.start_button.setEnabled(True)
+        self.reger_thread = None
+        self.reger_worker = None
+        self.add_log(message)
 
 
 if __name__ == "__main__":
