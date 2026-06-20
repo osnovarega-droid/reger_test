@@ -460,27 +460,43 @@ def click_text_or_fallback(pyautogui_module, pytesseract_module, words, fallback
 
 
 def click_random_birth_day(pyautogui_module, pytesseract_module, day_field_point, log):
-    selected_day = random.randint(BIRTH_DAY_MIN, BIRTH_DAY_MAX)
+
     candidates = []
     if pytesseract_module is not None:
+        log("Start reger: после нажатия поля День делаю скриншот всего браузера и анализирую координаты цифр 1-18.")
         for point in get_text_points_on_screen(pyautogui_module, pytesseract_module):
-            if point["normalized"] != str(selected_day):
+            if not point["normalized"].isdigit():
+                continue
+            day_number = int(point["normalized"])
+            if day_number < BIRTH_DAY_MIN or day_number > BIRTH_DAY_MAX:
                 continue
             if day_field_point and point["y"] <= day_field_point["y"] + 8:
                 continue
-            candidates.append(point)
+            candidates.append({**point, "day": day_number})
 
     if candidates:
-        candidates.sort(key=lambda item: item["y"])
-        point = candidates[0]
-        log(f"Start reger: на скриншоте найдены координаты дня {selected_day} ({int(point['x'])}, {int(point['y'])}); нажимаю.")
+        candidates_by_day = {}
+        for candidate in sorted(candidates, key=lambda item: item["y"]):
+            candidates_by_day.setdefault(candidate["day"], candidate)
+        selected_day = random.choice(list(candidates_by_day.keys()))
+        point = candidates_by_day[selected_day]
+        log(
+            "Start reger: на скриншоте найдены дни "
+            f"{', '.join(map(str, sorted(candidates_by_day)))}; случайно выбран день {selected_day} "
+            f"с координатами ({int(point['x'])}, {int(point['y'])}). Делаю контрольный скриншот и нажимаю."
+        )
+        pyautogui_module.screenshot()
     else:
+        selected_day = random.randint(BIRTH_DAY_MIN, BIRTH_DAY_MAX)        
         if day_field_point:
             point = {"x": day_field_point["x"], "y": day_field_point["y"] + 45 + (selected_day - 1) * 28}
         else:
             point = fallback_point(pyautogui_module, 0.36, 0.58)
-        log(f"Start reger: день {selected_day} через OCR не найден, нажимаю резервные координаты ({int(point['x'])}, {int(point['y'])}).")
-
+        log(
+            f"Start reger: цифры 1-18 через OCR не найдены, случайно выбран день {selected_day}; "
+            f"делаю контрольный скриншот и нажимаю резервные координаты ({int(point['x'])}, {int(point['y'])})."
+        )
+        pyautogui_module.screenshot()
     pyautogui_module.moveTo(point["x"], point["y"], duration=0.2)
     pyautogui_module.click(clicks=1)
     return selected_day
@@ -503,7 +519,14 @@ def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
     pyautogui_module.write(str(selected_year), interval=0.03)
     log(f"Start reger: в поле Год введён случайный год {selected_year}.")
 
+    log("Start reger: после ввода года прокручиваю страницу вниз 2 секунды перед поиском финальной синей кнопки.")
+    scroll_deadline = time.time() + 2
+    while time.time() < scroll_deadline:
+        pyautogui_module.scroll(-5)
+        time.sleep(0.1)
+
     time.sleep(0.5)
+    log("Start reger: после прокрутки делаю скриншот браузера и ищу финальную синюю кнопку.")
     final_button_point = find_blue_button_point(pyautogui_module)
     if not final_button_point:
         final_button_point = fallback_point(pyautogui_module, 0.50, 0.965)
