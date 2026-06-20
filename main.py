@@ -156,6 +156,8 @@ def build_edge_args(edge_path, port, user_data_dir):
         edge_path,
         "--inprivate",
         f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-allow-origins=*",        
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
@@ -256,12 +258,26 @@ def generate_outlook_email():
     return f"{first_name}_{last_name}{digits}@outlook.com"
 
 
-def wait_for_debugger(port, timeout=20):
+def wait_for_debugger(port, timeout=20, status_callback=None, output_file=None, process=None):
     deadline = time.time() + timeout
+    version_url = f"http://127.0.0.1:{port}/json/version"
     list_url = f"http://127.0.0.1:{port}/json/list"
     new_tab_url = f"http://127.0.0.1:{port}/json/new?{urllib.parse.quote(TARGET_URL, safe=':/?=&')}"
     target_host = urllib.parse.urlparse(TARGET_URL).netloc.lower()
+    last_error = ""
 
+    def remember_error(exc):
+        nonlocal last_error
+        last_error = str(exc)
+
+    def process_exit_message():
+        if process is None:
+            return ""
+        exit_code = process.poll()
+        if exit_code is None:
+            return ""
+        return f" Microsoft Edge завершился с кодом {exit_code}."
+        
     def is_signup_tab(tab):
         tab_url = (tab.get("url") or "").lower()
         tab_title = (tab.get("title") or "").lower()
@@ -270,8 +286,17 @@ def wait_for_debugger(port, timeout=20):
     def usable_tab(tab):
         return tab.get("type") == "page" and tab.get("webSocketDebuggerUrl")
 
+    if status_callback:
+        status_callback(f"Start reger: жду DevTools на 127.0.0.1:{port}.")
+
     while time.time() < deadline:
+        if process is not None and process.poll() is not None:
+            break
+
         try:
+            with urllib.request.urlopen(version_url, timeout=1) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"/json/version вернул HTTP {response.status}")
             with urllib.request.urlopen(list_url, timeout=1) as response:
                 tabs = json.loads(response.read().decode("utf-8"))
 
@@ -293,11 +318,21 @@ def wait_for_debugger(port, timeout=20):
                 tab = json.loads(response.read().decode("utf-8"))
             if usable_tab(tab):
                 return tab["webSocketDebuggerUrl"]
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+            remember_error(exc)
             time.sleep(0.4)
 
-    raise RuntimeError("Не удалось подключиться к Microsoft Edge DevTools.")
-
+    details = read_process_output(output_file) if output_file else ""
+    message = (
+        f"Не удалось подключиться к Microsoft Edge DevTools на 127.0.0.1:{port}."
+        " Поэтому автоматизация не может нажимать и вводить текст в открытом окне."
+        f"{process_exit_message()}"
+    )
+    if last_error:
+        message += f" Последняя ошибка DevTools: {last_error}."
+    if details:
+        message += f" Вывод Microsoft Edge: {details}"
+    raise RuntimeError(message)
 
 class CdpClient:
     def __init__(self, ws_url):
@@ -320,11 +355,17 @@ class CdpClient:
         self.ws.close()
 
 
-def automate_signup_page(port=CDP_PORT, status_callback=None):
+def automate_signup_page(port=CDP_PORT, status_callback=None, output_file=None, process=None):
     email = generate_outlook_email()
     if status_callback:
         status_callback("Start reger: подключаюсь к вкладке регистрации Microsoft Edge.")
-    ws_url = wait_for_debugger(port, timeout=PAGE_AUTOMATION_TIMEOUT)
+    ws_url = wait_for_debugger(
+        port,
+        timeout=PAGE_AUTOMATION_TIMEOUT,
+        status_callback=status_callback,
+        output_file=output_file,
+        process=process,
+    )
     cdp = CdpClient(ws_url)
 
     def log(message):
@@ -457,7 +498,7 @@ class RegerRunner(QObject):
                 edge_pid = wait_for_edge_pid(output_file, edge_pids_before_start, process.pid)
 
             self.status.emit(f"Start reger: найден Microsoft Edge PID {edge_pid}. Продолжаю регистрацию в этом окне.")
-            email = automate_signup_page(port, self.status.emit)
+            email = automate_signup_page(port, self.status.emit, output_file, process)
             self.status.emit(f"Start reger: введена электронная почта {email} и нажата кнопка Далее.")
             wait_until_edge_closed(port, edge_pid)
             self.finished.emit(True, f'Start reger: окно "{EDGE_WINDOW_TITLE}" закрыто.')
