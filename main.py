@@ -491,7 +491,14 @@ def select_dropdown_with_random_downs(pyautogui_module, field_name, log):
     pyautogui_module.press("enter")
     log(f"Start reger: поле {field_name} выбрано через {down_presses} случайных нажатий стрелки вниз и Enter.")
     return down_presses
-
+def get_display_names_from_email(email):
+    local_part = email.split("@", 1)[0]
+    name_part = "".join(character for character in local_part if not character.isdigit())
+    first_name, separator, last_name = name_part.partition("_")
+    if not separator or not first_name or not last_name:
+        return None, None
+    return first_name.capitalize(), last_name.capitalize()
+    return first_name.capitalize(), last_name.capitalize()
 
 def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
     time.sleep(2)
@@ -536,6 +543,38 @@ def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
     )
 
 
+def fill_name_after_birth_date(pyautogui_module, email, log):
+    first_name, last_name = get_display_names_from_email(email)
+    if not first_name or not last_name:
+        log(f"Start reger: не удалось разобрать имя и фамилию из логина {email}; пропускаю ввод имени.")
+        return
+
+    time.sleep(2)
+    copy_text_to_clipboard(first_name)
+    pyautogui_module.hotkey("ctrl", "v")
+    log(f"Start reger: из созданного логина {email} определено имя {first_name}; имя вставлено через Ctrl+V.")
+
+    pyautogui_module.press("tab")
+    copy_text_to_clipboard(last_name)
+    pyautogui_module.hotkey("ctrl", "v")
+    log(f"Start reger: после Tab введена фамилия {last_name} из созданного логина.")
+
+    time.sleep(0.8)
+    log("Start reger: после ввода имени и фамилии делаю скриншот браузера и ищу синюю кнопку.")
+    name_button_point = find_blue_button_point(pyautogui_module)
+    if not name_button_point:
+        name_button_point = fallback_point(pyautogui_module, 0.50, 0.665)
+        log("Start reger: синяя кнопка после ввода имени на скриншоте не найдена, использую резервные координаты.")
+    else:
+        log(
+            "Start reger: на скриншоте после ввода имени найдена синяя кнопка "
+            f"({int(name_button_point['x'])}, {int(name_button_point['y'])}); нажимаю."
+        )
+
+    pyautogui_module.moveTo(name_button_point["x"], name_button_point["y"], duration=0.2)
+    pyautogui_module.click(clicks=1)
+    log("Start reger: синяя кнопка после ввода имени и фамилии нажата.")
+    
 def is_microsoft_button_blue(red, green, blue):
     return 0 <= red <= 45 and 90 <= green <= 170 and 160 <= blue <= 235 and blue > red + 110 and green > red + 60
 
@@ -672,6 +711,10 @@ def automate_signup_page(status_callback=None, edge_pid=None):
         raise RuntimeError(f'Не найден HWND открытого окна Microsoft Edge для PID {edge_pid} через диспетчер задач.')
 
     time.sleep(3)
+    if not activate_edge_window(edge_pid):
+        raise RuntimeError(f'Не удалось повторно активировать HWND окна Microsoft Edge для PID {edge_pid} перед вводом URL.')
+    log("Start reger: перед вводом URL окно Edge повторно поднято и активировано через HWND.")
+    time.sleep(0.5)
     pyautogui.hotkey("ctrl", "l")
     pyautogui.write(TARGET_URL, interval=0.01)
     pyautogui.press("enter")
@@ -744,7 +787,8 @@ def automate_signup_page(status_callback=None, edge_pid=None):
     log("Start reger: кнопка после ввода пароля нажата по координатам синей кнопки.")
 
     fill_birth_date_after_password(pyautogui, pytesseract, log)
-
+    fill_name_after_birth_date(pyautogui, email, log)
+    
     save_account_credentials(email, password)
     log(f"Start reger: аккаунт сохранён в {LOGPASS_FILE.name} в формате mail:password.")
     return email, password
