@@ -260,14 +260,28 @@ def wait_for_debugger(port, timeout=20):
     deadline = time.time() + timeout
     list_url = f"http://127.0.0.1:{port}/json/list"
     new_tab_url = f"http://127.0.0.1:{port}/json/new?{urllib.parse.quote(TARGET_URL, safe=':/?=&')}"
+    target_host = urllib.parse.urlparse(TARGET_URL).netloc.lower()
+
+    def is_signup_tab(tab):
+        tab_url = (tab.get("url") or "").lower()
+        tab_title = (tab.get("title") or "").lower()
+        return target_host in tab_url or "signup" in tab_url or "учетн" in tab_title or "microsoft" in tab_title
+
+    def usable_tab(tab):
+        return tab.get("type") == "page" and tab.get("webSocketDebuggerUrl")
 
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(list_url, timeout=1) as response:
                 tabs = json.loads(response.read().decode("utf-8"))
-            for tab in tabs:
-                if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
-                    return tab["webSocketDebuggerUrl"]
+
+            signup_tabs = [tab for tab in tabs if usable_tab(tab) and is_signup_tab(tab)]
+            if signup_tabs:
+                return signup_tabs[0]["webSocketDebuggerUrl"]
+
+            page_tabs = [tab for tab in tabs if usable_tab(tab)]
+            if page_tabs:
+                return page_tabs[0]["webSocketDebuggerUrl"]
 
             try:
                 request = urllib.request.Request(new_tab_url, method="PUT")
@@ -277,7 +291,7 @@ def wait_for_debugger(port, timeout=20):
 
             with response:
                 tab = json.loads(response.read().decode("utf-8"))
-            if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
+            if usable_tab(tab):
                 return tab["webSocketDebuggerUrl"]
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
             time.sleep(0.4)
@@ -306,8 +320,10 @@ class CdpClient:
         self.ws.close()
 
 
-def automate_signup_page(port=CDP_PORT):
+def automate_signup_page(port=CDP_PORT, status_callback=None):
     email = generate_outlook_email()
+    if status_callback:
+        status_callback("Start reger: подключаюсь к вкладке регистрации Microsoft Edge.")
     ws_url = wait_for_debugger(port, timeout=PAGE_AUTOMATION_TIMEOUT)
     cdp = CdpClient(ws_url)
 
@@ -331,9 +347,16 @@ def automate_signup_page(port=CDP_PORT):
             }
             throw new Error(errorMessage);
         };
-        const findByText = (text) => [...document.querySelectorAll('button, a, div, span, h1, h2, h3, label, [role="button"]')]
+        const allElements = (root = document) => {
+            const result = [...root.querySelectorAll('*')];
+            for (const el of [...result]) {
+                if (el.shadowRoot) result.push(...allElements(el.shadowRoot));
+            }
+            return result;
+        };
+        const findByText = (text) => allElements()
             .find(el => visible(el) && textOf(el).includes(text));
-        const findEmailInput = () => [...document.querySelectorAll('input, textarea')].find(el => {
+        const findEmailInput = () => allElements().filter(el => ['INPUT', 'TEXTAREA'].includes(el.tagName)).find(el => {
             if (!visible(el) || el.disabled || el.readOnly) return false;
             const meta = [el.type, el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.getAttribute('data-testid')].join(' ');
             return /email|membername|login|электрон/i.test(meta) || textOf(el).includes('Электронная почта');
@@ -355,22 +378,9 @@ def automate_signup_page(port=CDP_PORT):
             el.value = '';
             el.dispatchEvent(new Event('input', {bubbles: true}));
             await sleep(200);
-            try {
-                await navigator.clipboard.writeText(text);
-                const pasteEvent = new ClipboardEvent('paste', {
-                    bubbles: true,
-                    cancelable: true,
-                    clipboardData: new DataTransfer(),
-                });
-                pasteEvent.clipboardData.setData('text/plain', text);
-                el.dispatchEvent(pasteEvent);
-            } catch (_) {
-                document.execCommand('insertText', false, text);
-            }
-            if (el.value !== text) {
-                el.value = text;
-                el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertFromPaste', data: text}));
-            }
+            el.value = text;
+            el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: text}));
+            el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: text[text.length - 1] || ' '}));
             el.dispatchEvent(new Event('change', {bubbles: true}));
         };
         (async () => {
@@ -391,7 +401,7 @@ def automate_signup_page(port=CDP_PORT):
             await clickCenter(emailInput);
             await pasteText(emailInput, email);
             await sleep(800);
-            const nextButton = await waitUntil(() => [...document.querySelectorAll('button, input[type="submit"], [role="button"]')].find(el => visible(el) && /далее|next/i.test(textOf(el))), 30000, 'Не найдена кнопка "Далее".');
+            const nextButton = await waitUntil(() => allElements().find(el => visible(el) && (/^(BUTTON|INPUT)$/.test(el.tagName) || el.getAttribute('role') === 'button') && /далее|next/i.test(textOf(el))), 30000, 'Не найдена кнопка "Далее".');
             await clickCenter(nextButton);
             done({ok: true, email});
         })().catch(error => done({ok: false, error: error.message, email}));
@@ -447,7 +457,7 @@ class RegerRunner(QObject):
                 edge_pid = wait_for_edge_pid(output_file, edge_pids_before_start, process.pid)
 
             self.status.emit(f"Start reger: найден Microsoft Edge PID {edge_pid}. Продолжаю регистрацию в этом окне.")
-            email = automate_signup_page(port)
+            email = automate_signup_page(port, self.status.emit)
             self.status.emit(f"Start reger: введена электронная почта {email} и нажата кнопка Далее.")
             wait_until_edge_closed(port, edge_pid)
             self.finished.emit(True, f'Start reger: окно "{EDGE_WINDOW_TITLE}" закрыто.')
