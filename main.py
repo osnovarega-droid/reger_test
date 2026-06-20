@@ -14,10 +14,7 @@ from datetime import datetime
 from glob import glob
 from pathlib import Path
 
-try:
-    import websocket
-except ImportError:
-    websocket = None
+import websocket
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
@@ -66,6 +63,10 @@ def get_edge_popen_kwargs(stderr_target=None):
 
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 1
+        kwargs["startupinfo"] = startupinfo
 
     return kwargs
 
@@ -95,7 +96,6 @@ def build_edge_args(edge_path, port, user_data_dir):
         "--disable-background-mode",
         "--disable-features=Translate,OptimizationHints",
         "--disable-dev-shm-usage",
-        "--no-sandbox",
         TARGET_URL,
     ]
 
@@ -171,9 +171,6 @@ def wait_for_debugger(port, timeout=20):
 
 class CdpClient:
     def __init__(self, ws_url):
-        if websocket is None:
-            raise RuntimeError("Установите зависимость websocket-client: py -m pip install -r requirements.txt")
-
         self.ws = websocket.create_connection(ws_url, timeout=10)
         self.next_id = 0
 
@@ -312,11 +309,14 @@ class RegerRunner(QObject):
                 self.finished.emit(True, "Start reger: автоматизация завершена. PID стартового процесса уже закрыт, поэтому дальнейшее закрытие окна не отслеживается.")
         except Exception as exc:
             if process and process.poll() is None:
-                process.terminate()
-                self.status.emit(f"Start reger: процесс Microsoft Edge PID {process.pid} остановлен из-за ошибки.")
+                self.status.emit(
+                    f"Start reger: Microsoft Edge PID {process.pid} оставлен открытым, "
+                    "чтобы можно было увидеть открытую страницу и ошибку автоматизации."
+                )
             self.finished.emit(False, f"Ошибка Start reger: {exc}")
         finally:
-            shutil.rmtree(user_data_dir, ignore_errors=True)
+            if not process or process.poll() is not None:
+                shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
 def get_default_edge_path():
@@ -633,13 +633,23 @@ class EdgeLauncher(QWidget):
             self.add_log("Start reger уже выполняется.")
             return
 
-        self.config = load_config()
-        edge_path = self.config.get("edge_path", "").strip()
-        valid, error = validate_edge_path(edge_path)
+        input_path = self.path_input.text().strip()
+        config_path = load_config().get("edge_path", "").strip()
+        candidates = [input_path, config_path, find_edge_auto()]
+        edge_path = next((path for path in candidates if validate_edge_path(path)[0]), "")
 
-        if not valid:
-            self.add_log(error)
+        if not edge_path:
+            self.add_log(
+                "Microsoft Edge не найден. Укажите путь к msedge.exe в Settings "
+                "или нажмите «Найти автоматически»."
+            )
             return
+
+        if edge_path != self.config.get("edge_path", ""):
+            self.config["edge_path"] = edge_path
+            self.path_input.setText(edge_path)
+            save_config(self.config)
+            self.add_log(f"Путь к Microsoft Edge сохранён: {edge_path}")
 
         self.start_button.setEnabled(False)
         self.add_log("Start reger: открываю Microsoft Edge и жду загрузку страницы.")
