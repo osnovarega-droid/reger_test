@@ -104,11 +104,11 @@ def get_edge_process_ids():
     return process_ids
 
 
-def get_window_process_ids(window_title=EDGE_WINDOW_TITLE):
+def get_window_process_ids(window_title=None):
     if os.name != "nt":
         return set()
 
-    expected_title = window_title.lower()
+    expected_title = window_title.lower() if window_title else None
     process_ids = set()
     user32 = ctypes.windll.user32
 
@@ -117,14 +117,15 @@ def get_window_process_ids(window_title=EDGE_WINDOW_TITLE):
             return True
 
         length = user32.GetWindowTextLengthW(hwnd)
-        if length <= 0:
-            return True
+        if expected_title:
+            if length <= 0:
+                return True
 
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
-        title = buffer.value.strip()
-        if expected_title not in title.lower():
-            return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = buffer.value.strip()
+            if expected_title not in title.lower():
+                return True
 
         pid = ctypes.c_ulong()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -197,18 +198,20 @@ def wait_for_edge_pid(output_file, known_pids=None, launched_pid=None, timeout=E
         current_pids = get_edge_process_ids()
         last_seen_pids = current_pids
 
-        if launched_pid and launched_pid in current_pids:
+        window_pids = get_window_process_ids()
+
+        if launched_pid and launched_pid in current_pids and launched_pid in window_pids:
             return launched_pid
 
         new_pids = current_pids - known_pids
         if new_pids:
-            window_pids = get_window_process_ids()
+
             window_new_pids = sorted(new_pids & window_pids)
             if window_new_pids:
                 return window_new_pids[0]
-            return sorted(new_pids)[0]
+        
 
-        window_pids = get_window_process_ids()
+   
         reusable_pids = sorted(current_pids & window_pids)
         if reusable_pids:
             return reusable_pids[0]
@@ -229,7 +232,7 @@ def wait_for_edge_pid(output_file, known_pids=None, launched_pid=None, timeout=E
 
 
 def wait_until_edge_closed(edge_pid=None):
-    while (edge_pid and edge_pid in get_edge_process_ids()) or is_edge_window_open():
+    while (edge_pid and edge_pid in get_edge_process_ids()) or (not edge_pid and is_edge_window_open()):
         time.sleep(EDGE_MONITOR_INTERVAL)
 
 
@@ -240,10 +243,55 @@ def generate_outlook_email():
     return f"{first_name}_{last_name}{digits}@outlook.com"
 
 
-def activate_edge_window(window_title=EDGE_WINDOW_TITLE):
-    if os.name != "nt":
+def get_window_handles_for_pid(target_pid):
+    if os.name != "nt" or not target_pid:
+        return []
+
+    handles = []
+    user32 = ctypes.windll.user32
+
+    def enum_handler(hwnd, _):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == target_pid:
+            handles.append(hwnd)
+        return True
+
+    enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    user32.EnumWindows(enum_windows_proc(enum_handler), 0)
+    return handles
+
+
+def activate_window_handle(hwnd):
+    if os.name != "nt" or not hwnd:
         return False
 
+    user32 = ctypes.windll.user32
+    hwnd_topmost = ctypes.c_void_p(-1)
+    hwnd_notopmost = ctypes.c_void_p(-2)
+    sw_restore = 9
+    swp_nomove = 0x0002
+    swp_nosize = 0x0001
+    swp_showwindow = 0x0040
+
+    user32.ShowWindow(hwnd, sw_restore)
+    user32.SetWindowPos(hwnd, hwnd_topmost, 0, 0, 0, 0, swp_nomove | swp_nosize | swp_showwindow)
+    user32.SetWindowPos(hwnd, hwnd_notopmost, 0, 0, 0, 0, swp_nomove | swp_nosize | swp_showwindow)
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def activate_edge_window(edge_pid=None, window_title=EDGE_WINDOW_TITLE):
+    if os.name != "nt":
+        return False
+    if edge_pid:
+        handles = get_window_handles_for_pid(edge_pid)
+        if handles:
+            return activate_window_handle(handles[0])
+        return False
     expected_title = window_title.lower()
     user32 = ctypes.windll.user32
     found_hwnd = ctypes.c_void_p()
@@ -266,9 +314,7 @@ def activate_edge_window(window_title=EDGE_WINDOW_TITLE):
     if not found_hwnd.value:
         return False
 
-    user32.ShowWindow(found_hwnd.value, 9)
-    user32.SetForegroundWindow(found_hwnd.value)
-    return True
+    return activate_window_handle(found_hwnd.value)
 
 
 def get_foreground_window_rect():
@@ -341,7 +387,7 @@ def fallback_point(pyautogui_module, relative_x, relative_y):
     }
 
 
-def automate_signup_page(status_callback=None):
+def automate_signup_page(status_callback=None, edge_pid=None):
     email = generate_outlook_email()
 
     def log(message):
@@ -358,16 +404,16 @@ def automate_signup_page(status_callback=None):
     if pytesseract is None:
         log("Start reger: pytesseract недоступен, включён резервный режим координат без OCR.")
 
-    log("Start reger: работаю без DevTools — анализирую видимое окно браузера и кликаю по координатам текста.")
+    log("Start reger: работаю без DevTools — по PID получаю HWND окна Edge, поднимаю его поверх остальных один раз и продолжаю по координатам.")
     pyautogui.PAUSE = 0.25
 
     deadline = time.time() + VISUAL_AUTOMATION_TIMEOUT
     while time.time() < deadline:
-        if activate_edge_window():
+        if activate_edge_window(edge_pid):
             break
         time.sleep(0.5)
     else:
-        raise RuntimeError(f'Не найдено открытое окно "{EDGE_WINDOW_TITLE}" для визуальной автоматизации.')
+        raise RuntimeError(f'Не найден HWND открытого окна Microsoft Edge для PID {edge_pid} через диспетчер задач.')
 
     time.sleep(3)
     pyautogui.hotkey("ctrl", "l")
@@ -464,7 +510,7 @@ class RegerRunner(QObject):
                 edge_pid = wait_for_edge_pid(output_file, edge_pids_before_start, process.pid)
 
             self.status.emit(f"Start reger: найден Microsoft Edge PID {edge_pid}. Продолжаю регистрацию в этом окне.")
-            email = automate_signup_page(self.status.emit)
+            email = automate_signup_page(self.status.emit, edge_pid)
             self.status.emit(f"Start reger: введена электронная почта {email} и нажата кнопка Далее.")
             wait_until_edge_closed(edge_pid)
             self.finished.emit(True, f'Start reger: окно "{EDGE_WINDOW_TITLE}" закрыто.')
