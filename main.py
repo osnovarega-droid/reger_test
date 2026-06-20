@@ -276,7 +276,10 @@ def wait_for_debugger(port, timeout=20, status_callback=None, output_file=None, 
         exit_code = process.poll()
         if exit_code is None:
             return ""
-        return f" Microsoft Edge завершился с кодом {exit_code}."
+        return (
+            f" Стартовый процесс Microsoft Edge завершился с кодом {exit_code}, "
+            "но проверка DevTools продолжалась: Edge часто передаёт окно дочернему процессу."
+        )
         
     def is_signup_tab(tab):
         tab_url = (tab.get("url") or "").lower()
@@ -290,8 +293,7 @@ def wait_for_debugger(port, timeout=20, status_callback=None, output_file=None, 
         status_callback(f"Start reger: жду DevTools на 127.0.0.1:{port}.")
 
     while time.time() < deadline:
-        if process is not None and process.poll() is not None:
-            break
+
 
         try:
             with urllib.request.urlopen(version_url, timeout=1) as response:
@@ -451,6 +453,18 @@ def automate_signup_page(port=CDP_PORT, status_callback=None, output_file=None, 
         cdp.call("Runtime.enable")
         cdp.call("Page.enable")
         cdp.call("Page.bringToFront")
+        evaluate("new Promise(resolve => { if (document.readyState === 'complete') resolve(true); else window.addEventListener('load', () => resolve(true), {once: true}); })", timeout=45000)
+        log("Start reger: страница загружена, читаю HTML и ищу элементы как в DevTools/F12.")
+        html_info = evaluate("""(() => {
+            const html = document.documentElement.outerHTML || '';
+            const text = document.body?.innerText || '';
+            return {ok: true, htmlLength: html.length, hasEmail: /email|membername|электрон/i.test(html), hasNext: /next|далее/i.test(text + html)};
+        })()""", timeout=15000)
+        log(
+            "Start reger: HTML получен "
+            f"({html_info.get('htmlLength', 0)} символов), "
+            f"email={html_info.get('hasEmail')}, next={html_info.get('hasNext')}."
+        )
         evaluate(locator_js)
         mouse_click(evaluate("window.__regerWaitForPoint('title')").get("point"), "Создание учетной записи Майкрософт")
         mouse_click(evaluate("window.__regerWaitForPoint('email', 30000)").get("point"), "Электронная почта")
