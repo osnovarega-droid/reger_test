@@ -47,8 +47,8 @@ LAST_NAMES = [
     "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
 ]
 CDP_PORT = 9222
-CHROMIUM_STARTUP_TIMEOUT = 8
-CHROMIUM_INITIAL_CHECK_DELAY = 3
+CHROMIUM_STARTUP_TIMEOUT = 20
+CHROMIUM_INITIAL_CHECK_DELAY = 2
 CHROMIUM_MONITOR_INTERVAL = 1
 
 def get_free_port():
@@ -81,7 +81,7 @@ def read_process_output(output_file):
 def build_chromium_args(chromium_path, port, user_data_dir):
     return [
         chromium_path,
-        "--incognito",
+
         "--new-window",
         f"--remote-debugging-port={port}",
         "--remote-debugging-address=127.0.0.1",
@@ -90,6 +90,11 @@ def build_chromium_args(chromium_path, port, user_data_dir):
         "--no-default-browser-check",
         "--no-first-run",
         "--disable-session-crashed-bubble",
+        "--disable-extensions",
+        "--disable-background-mode",
+        "--disable-features=Translate,OptimizationHints",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
         TARGET_URL,
     ]
 
@@ -97,21 +102,28 @@ def build_chromium_args(chromium_path, port, user_data_dir):
 def ensure_chromium_started(process, output_file, port):
     time.sleep(CHROMIUM_INITIAL_CHECK_DELAY)
     deadline = time.time() + CHROMIUM_STARTUP_TIMEOUT
-
+    process_exited_at = None
     while time.time() < deadline:
-        if process.poll() is None:
-            return True
+
 
         try:
             wait_for_debugger(port, timeout=1)
-            return False
+            return process.poll() is None
         except RuntimeError:
-            pass
+            if process.poll() is not None and process_exited_at is None:
+                process_exited_at = time.time()
 
-        time.sleep(0.4)
+            if process_exited_at and time.time() - process_exited_at > 3:
+                break
+
+        time.sleep(0.3)
 
     details = read_process_output(output_file)
-    message = "Chromium закрылся после запуска или окно пропало. Проверьте путь к chrome.exe и параметры запуска."
+    exit_code = process.poll()
+    if exit_code is None:
+        message = "Chromium запущен, но DevTools-порт не открылся. Проверьте параметры запуска и антивирус/фаервол."
+    else:
+        message = f"Chromium завершился сразу после запуска с кодом {exit_code}. Проверьте путь к chrome.exe и параметры запуска."
     if details:
         message += f" Вывод Chromium: {details}"
     raise RuntimeError(message)
@@ -278,7 +290,7 @@ class RegerRunner(QObject):
                 self.status.emit("Start reger: стартовый процесс Chromium завершился, но окно доступно через DevTools. Продолжаю работу без PID-мониторинга.")
 
             email = automate_signup_page(port)
-            self.status.emit(f"Start reger: Chromium открыт в режиме инкогнито, введена почта {email} и нажата кнопка Далее.")
+            self.status.emit(f"Start reger: Chromium открыт в отдельном чистом профиле, введена почта {email} и нажата кнопка Далее.")
 
             if pid_is_alive:
                 wait_until_chromium_closed(process)
@@ -395,8 +407,7 @@ class ChromiumLauncher(QWidget):
         self.sidebar.setObjectName("sidebar")
         self.sidebar.setFixedWidth(220)
 
-        self.logo = QLabel("REGER")
-        self.logo.setObjectName("logo")
+
 
         self.main_button = self.create_nav_button("▦  Main", 0)
         self.settings_button = self.create_nav_button("⚙  Settings", 1)
@@ -408,10 +419,8 @@ class ChromiumLauncher(QWidget):
         self.logs_box.setReadOnly(True)
 
         sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(18, 24, 18, 18)
-        sidebar_layout.setSpacing(12)
-        sidebar_layout.addWidget(self.logo)
-        sidebar_layout.addSpacing(20)
+        sidebar_layout.setContentsMargins(18, 10, 18, 18)
+        sidebar_layout.setSpacing(8)
         sidebar_layout.addWidget(self.main_button)
         sidebar_layout.addWidget(self.settings_button)
         sidebar_layout.addSpacing(20)
@@ -525,7 +534,7 @@ class ChromiumLauncher(QWidget):
         self.setStyleSheet("""
             QWidget { background-color: #0B1120; color: #F8FAFC; font-family: Segoe UI, Arial; font-size: 14px; }
             #sidebar { background-color: #020617; border-right: 1px solid #1E293B; }
-            #logo { font-size: 28px; font-weight: 900; color: #38BDF8; letter-spacing: 3px; }
+
             #navButton { text-align: left; background-color: transparent; border: 1px solid transparent; border-radius: 14px; padding: 14px; color: #CBD5E1; font-weight: 700; }
             #navButton:hover { background-color: #162033; color: white; }
             #navButton[active="true"] { background-color: #1E40AF; color: white; border: 1px solid #60A5FA; }
