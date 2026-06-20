@@ -47,25 +47,62 @@ LAST_NAMES = [
     "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
 ]
 CDP_PORT = 9222
+CHROMIUM_STARTUP_TIMEOUT = 8
 
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
-def get_chromium_popen_kwargs():
+def get_chromium_popen_kwargs(stderr_target=None):
     kwargs = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stderr": stderr_target or subprocess.DEVNULL,
         "close_fds": os.name != "nt",
     }
 
     if os.name == "nt":
-        kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP
-        )
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
     return kwargs
+
+
+def read_process_output(output_file):
+    try:
+        text = Path(output_file).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+    return text[-1200:]
+
+
+def build_chromium_args(chromium_path, port, user_data_dir):
+    return [
+        chromium_path,
+        "--incognito",
+        "--new-window",
+        f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-allow-origins=*",
+        f"--user-data-dir={user_data_dir}",
+        "--no-default-browser-check",
+        "--no-first-run",
+        "--disable-session-crashed-bubble",
+        TARGET_URL,
+    ]
+
+
+def ensure_chromium_started(process, output_file):
+    deadline = time.time() + CHROMIUM_STARTUP_TIMEOUT
+
+    while time.time() < deadline:
+        if process.poll() is not None:
+            details = read_process_output(output_file)
+            message = "Chromium сразу закрылся после запуска. Проверьте путь к chrome.exe и параметры запуска."
+            if details:
+                message += f" Вывод Chromium: {details}"
+            raise RuntimeError(message)
+        time.sleep(0.2)
 
 
 def generate_outlook_email():
@@ -205,24 +242,22 @@ class RegerRunner(QObject):
     def run(self):
         user_data_dir = tempfile.mkdtemp(prefix="reger-chromium-")
         port = get_free_port()
-        
+        output_file = Path(user_data_dir) / "chromium-startup.log"
+        process = None
+
         try:
-            process = subprocess.Popen([
-                self.chromium_path,
-                f"--remote-debugging-port={port}",
-                f"--user-data-dir={user_data_dir}",
-                "--incognito",
-                "--new-window",
-                "--no-default-browser-check",
-                "--no-first-run",
-                TARGET_URL,
-            ], **get_chromium_popen_kwargs())
-            time.sleep(0.5)
-            if process.poll() is not None:
-                raise RuntimeError("Chromium сразу закрылся после запуска. Проверьте путь к chrome.exe и параметры запуска.")
+            with open(output_file, "w", encoding="utf-8", errors="replace") as stderr_target:
+                process = subprocess.Popen(
+                    build_chromium_args(self.chromium_path, port, user_data_dir),
+                    **get_chromium_popen_kwargs(stderr_target),
+                )
+                ensure_chromium_started(process, output_file)
+
             email = automate_signup_page(port)
-            self.finished.emit(True, f"Start reger: введена почта {email} и нажата кнопка Далее.")
+            self.finished.emit(True, f"Start reger: Chromium открыт в режиме инкогнито, введена почта {email} и нажата кнопка Далее.")
         except Exception as exc:
+            if process and process.poll() is None:
+                process.terminate()
             self.finished.emit(False, f"Ошибка Start reger: {exc}")
         finally:
             shutil.rmtree(user_data_dir, ignore_errors=True)
@@ -574,7 +609,7 @@ class ChromiumLauncher(QWidget):
     def on_reger_thread_finished(self):
         self.reger_thread = None
         self.reger_worker = None
-  
+
 
 
 if __name__ == "__main__":
