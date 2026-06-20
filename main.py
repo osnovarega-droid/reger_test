@@ -327,9 +327,35 @@ def automate_signup_page(port=CDP_PORT, status_callback=None):
     ws_url = wait_for_debugger(port, timeout=PAGE_AUTOMATION_TIMEOUT)
     cdp = CdpClient(ws_url)
 
-    js = """
-        const email = __EMAIL__;
-        const REQUIRED_TITLE_TEXT = 'Создание учетной записи Майкрософт';
+    def log(message):
+        if status_callback:
+            status_callback(message)
+
+    def evaluate(expression, timeout=60000):
+        result = cdp.call("Runtime.evaluate", {
+            "expression": expression,
+            "awaitPromise": True,
+            "timeout": timeout,
+            "userGesture": True,
+            "returnByValue": True,
+        })
+        value = result.get("result", {}).get("value")
+        if isinstance(value, dict) and value.get("ok") is False:
+            raise RuntimeError(value.get("error", "Неизвестная ошибка автоматизации."))
+        return value
+
+    def mouse_click(point, label):
+        if not point:
+            raise RuntimeError(f"Не найдены координаты для клика: {label}.")
+        x = point["x"]
+        y = point["y"]
+        log(f"Start reger: кликаю мышкой по элементу «{label}» ({round(x)}, {round(y)}).")
+        cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "none"})
+        cdp.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
+        cdp.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+        time.sleep(0.3)
+
+    locator_js = r'''
         const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
         const visible = (el) => {
             if (!el) return false;
@@ -337,16 +363,7 @@ def automate_signup_page(port=CDP_PORT, status_callback=None):
             const style = window.getComputedStyle(el);
             return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
         };
-        const textOf = (el) => (el?.innerText || el?.textContent || el?.value || el?.getAttribute('aria-label') || '').trim();
-        const waitUntil = async (predicate, timeout = 45000, errorMessage = 'Страница не загрузила нужный элемент за отведённое время.') => {
-            const started = Date.now();
-            while (Date.now() - started < timeout) {
-                const value = predicate();
-                if (value) return value;
-                await sleep(250);
-            }
-            throw new Error(errorMessage);
-        };
+        const textOf = (el) => (el?.innerText || el?.textContent || el?.value || el?.getAttribute('aria-label') || el?.placeholder || '').trim();
         const allElements = (root = document) => {
             const result = [...root.querySelectorAll('*')];
             for (const el of [...result]) {
@@ -354,72 +371,55 @@ def automate_signup_page(port=CDP_PORT, status_callback=None):
             }
             return result;
         };
-        const findByText = (text) => allElements()
-            .find(el => visible(el) && textOf(el).includes(text));
+        const center = (el) => {
+            el.scrollIntoView({block: 'center', inline: 'center'});
+            const rect = el.getBoundingClientRect();
+            return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+        };
         const findEmailInput = () => allElements().filter(el => ['INPUT', 'TEXTAREA'].includes(el.tagName)).find(el => {
             if (!visible(el) || el.disabled || el.readOnly) return false;
             const meta = [el.type, el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.getAttribute('data-testid')].join(' ');
             return /email|membername|login|электрон/i.test(meta) || textOf(el).includes('Электронная почта');
         });
-        const clickCenter = async (el) => {
-            el.scrollIntoView({block: 'center', inline: 'center'});
-            await sleep(250);
-            const rect = el.getBoundingClientRect();
-            const options = {bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2};
-            el.dispatchEvent(new MouseEvent('mouseover', options));
-            el.dispatchEvent(new MouseEvent('mousemove', options));
-            el.dispatchEvent(new MouseEvent('mousedown', options));
-            el.dispatchEvent(new MouseEvent('mouseup', options));
-            el.click();
-            await sleep(500);
+        const findTitle = () => allElements().find(el => visible(el) && textOf(el).includes('Создание учетной записи Майкрософт'));
+        const findEmailLabelOrInput = () => allElements().find(el => visible(el) && textOf(el).includes('Электронная почта')) || findEmailInput();
+        const findNextButton = () => allElements().find(el => visible(el) && (/^(BUTTON|INPUT)$/.test(el.tagName) || el.getAttribute('role') === 'button') && /далее|next/i.test(textOf(el)));
+        const waitForPoint = async (kind, timeout = 45000) => {
+            const started = Date.now();
+            const finder = {title: findTitle, email: findEmailLabelOrInput, input: findEmailInput, next: findNextButton}[kind];
+            while (Date.now() - started < timeout) {
+                const el = finder();
+                if (el) return {ok: true, point: center(el)};
+                await sleep(250);
+            }
+            return {ok: false, error: `Не найден элемент: ${kind}.`};
         };
-        const pasteText = async (el, text) => {
-            el.focus();
-            el.value = '';
-            el.dispatchEvent(new Event('input', {bubbles: true}));
-            await sleep(200);
-            el.value = text;
-            el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: text}));
-            el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: text[text.length - 1] || ' '}));
-            el.dispatchEvent(new Event('change', {bubbles: true}));
+        window.__regerWaitForPoint = waitForPoint;
+        window.__regerSetEmail = async (email) => {
+            const input = findEmailInput();
+            if (!input) return {ok: false, error: 'Не найдено поле ввода электронной почты.'};
+            input.focus();
+            input.value = email;
+            input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: email}));
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+            return {ok: true};
         };
-        (async () => {
-            await waitUntil(() => document.readyState === 'complete');
-            const title = await waitUntil(
-                () => findByText(REQUIRED_TITLE_TEXT),
-                45000,
-                `Не появилась надпись "${REQUIRED_TITLE_TEXT}".`
-            );
-            await clickCenter(title);
-            const emailLabel = await waitUntil(
-                () => findByText('Электронная почта') || findEmailInput(),
-                30000,
-                'Не найдена надпись или поле "Электронная почта".'
-            );
-            await clickCenter(emailLabel);
-            const emailInput = await waitUntil(findEmailInput, 15000, 'Не найдено поле ввода электронной почты.');
-            await clickCenter(emailInput);
-            await pasteText(emailInput, email);
-            await sleep(800);
-            const nextButton = await waitUntil(() => allElements().find(el => visible(el) && (/^(BUTTON|INPUT)$/.test(el.tagName) || el.getAttribute('role') === 'button') && /далее|next/i.test(textOf(el))), 30000, 'Не найдена кнопка "Далее".');
-            await clickCenter(nextButton);
-            done({ok: true, email});
-        })().catch(error => done({ok: false, error: error.message, email}));
-    """.replace("__EMAIL__", json.dumps(email))
+    '''
 
     try:
-        wrapper = "new Promise(done => { " + js + " })"
-        result = cdp.call("Runtime.evaluate", {
-            "expression": wrapper,
-            "awaitPromise": True,
-            "timeout": 60000,
-            "userGesture": True,
-            "returnByValue": True,
-        })
-        value = result.get("result", {}).get("value", {})
-        if not value.get("ok"):
-            raise RuntimeError(value.get("error", "Неизвестная ошибка автоматизации."))
-        return value["email"]
+        cdp.call("Runtime.enable")
+        cdp.call("Page.enable")
+        cdp.call("Page.bringToFront")
+        evaluate(locator_js)
+        mouse_click(evaluate("window.__regerWaitForPoint('title')").get("point"), "Создание учетной записи Майкрософт")
+        mouse_click(evaluate("window.__regerWaitForPoint('email', 30000)").get("point"), "Электронная почта")
+        mouse_click(evaluate("window.__regerWaitForPoint('input', 15000)").get("point"), "поле ввода электронной почты")
+        log(f"Start reger: ввожу сгенерированный email {email}.")
+        cdp.call("Input.insertText", {"text": email})
+        time.sleep(0.5)
+        evaluate("window.__regerSetEmail(" + json.dumps(email) + ")", timeout=15000)
+        mouse_click(evaluate("window.__regerWaitForPoint('next', 30000)").get("point"), "Далее")
+        return email
     finally:
         cdp.close()
 
