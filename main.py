@@ -28,10 +28,15 @@ from PySide6.QtWidgets import (
     QFrame,
     QStackedWidget,
     QTextEdit,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,    
 )
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
+LOGPASS_FILE = APP_DIR / "logpass.txt"
 TARGET_URL = "https://signup.live.com/signup"
 
 
@@ -247,6 +252,10 @@ def generate_outlook_email():
     last_name = random.choice(LAST_NAMES).lower()
     return f"{first_name}_{last_name}{digits}@outlook.com"
 
+def save_account_credentials(email, password):
+    with open(LOGPASS_FILE, "a", encoding="utf-8") as file:
+        file.write(f"{email}:{password}\n")
+        
 def generate_password():
     password_length = random.randint(PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH)
     required_characters = [
@@ -601,8 +610,10 @@ def automate_signup_page(status_callback=None, edge_pid=None):
 
     pyautogui.moveTo(password_next_button_point["x"], password_next_button_point["y"], duration=0.2)
     pyautogui.click(clicks=1)
+    save_account_credentials(email, password)
+    log(f"Start reger: аккаунт сохранён в {LOGPASS_FILE.name} в формате mail:password.")
     log("Start reger: кнопка после ввода пароля нажата по координатам синей кнопки.")
-    return email
+    return email, password
 
 
 class EdgeFinder(QObject):
@@ -614,6 +625,7 @@ class EdgeFinder(QObject):
 
 class RegerRunner(QObject):
     status = Signal(str)
+    account_created = Signal(str, str, str, bool, bool, bool)
     finished = Signal(bool, str)
 
     def __init__(self, edge_path):
@@ -637,7 +649,8 @@ class RegerRunner(QObject):
                 edge_pid = wait_for_edge_pid(output_file, edge_pids_before_start, process.pid)
 
             self.status.emit(f"Start reger: найден Microsoft Edge PID {edge_pid}. Продолжаю регистрацию в этом окне.")
-            email = automate_signup_page(self.status.emit, edge_pid)
+            email, password = automate_signup_page(self.status.emit, edge_pid)
+            self.account_created.emit(email, password, "—", True, False, False)
             self.status.emit(f"Start reger: введена электронная почта {email}, затем сгенерирован пароль и нажата следующая синяя кнопка.")
             wait_until_edge_closed(edge_pid)
             self.finished.emit(True, f'Start reger: окно "{EDGE_WINDOW_TITLE}" закрыто.')
@@ -807,9 +820,30 @@ class EdgeLauncher(QWidget):
 
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(24, 24, 24, 24)
-        page_layout.setSpacing(0)
+        title = QLabel("Accounts")
+        title.setObjectName("accountsTitle")
+
+        subtitle = QLabel("Список созданных аккаунтов. Email сохраняется в logpass.txt в формате mail:password.")
+        subtitle.setObjectName("accountsSubtitle")
+        subtitle.setWordWrap(True)
+
+        self.accounts_table = QTableWidget(0, 3)
+        self.accounts_table.setObjectName("accountsTable")
+        self.accounts_table.setHorizontalHeaderLabels(["1. Емейл", "2. Steam", "3. 2FA"])
+        self.accounts_table.verticalHeader().setVisible(False)
+        self.accounts_table.setShowGrid(False)
+        self.accounts_table.setAlternatingRowColors(True)
+        self.accounts_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.accounts_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.accounts_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.accounts_table.horizontalHeader().setHighlightSections(False)
+
+        page_layout.setSpacing(16)
         page_layout.addWidget(self.start_button, 0)
-        page_layout.addStretch()
+        page_layout.addSpacing(8)
+        page_layout.addWidget(title)
+        page_layout.addWidget(subtitle)
+        page_layout.addWidget(self.accounts_table, 1)
         return page
 
     def create_settings_page(self):
@@ -899,11 +933,30 @@ class EdgeLauncher(QWidget):
             #startButton { background-color: #16A34A; font-size: 14px; padding: 10px 14px; }
             #startButton:hover { background-color: #15803D; }
             #statusLabel { color: #CBD5E1; min-height: 24px; }
+            #accountsTitle { font-size: 26px; font-weight: 900; color: white; margin-top: 6px; }
+            #accountsSubtitle { color: #94A3B8; font-size: 14px; }
+            #accountsTable { background-color: #0F172A; alternate-background-color: #111C31; border: 1px solid #263449; border-radius: 18px; color: #E2E8F0; padding: 8px; }
+            #accountsTable::item { padding: 12px; border-bottom: 1px solid #1E293B; }
+            #accountsTable::item:selected { background-color: #1E40AF; color: white; }
+            QHeaderView::section { background-color: #172033; color: #BAE6FD; border: none; border-bottom: 1px solid #334155; padding: 12px; font-weight: 900; }
         """)
 
     def add_log(self, message):
         self.logs_box.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
 
+    def add_account_row(self, email, password, steam, email_ready=True, steam_ready=False, twofa_ready=False):
+        row = self.accounts_table.rowCount()
+        self.accounts_table.insertRow(row)
+        values = [
+            f"{email} {'✅' if email_ready else '❌'}",
+            f"{steam or '—'} {'✅' if steam_ready else '❌'}",
+            f"2FA {'✅' if twofa_ready else '❌'}",
+        ]
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setToolTip(f"Пароль: {password}" if column == 0 else value)
+            self.accounts_table.setItem(row, column, item)
+        self.accounts_table.scrollToBottom()
     def choose_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Выберите Microsoft Edge .exe", "", "Executable (*.exe)")
         if file_path:
@@ -989,6 +1042,7 @@ class EdgeLauncher(QWidget):
         self.reger_worker.moveToThread(self.reger_thread)
         self.reger_thread.started.connect(self.reger_worker.run)
         self.reger_worker.status.connect(self.add_log)
+        self.reger_worker.account_created.connect(self.add_account_row)
         self.reger_worker.finished.connect(self.on_reger_finished)
         self.reger_worker.finished.connect(self.reger_thread.quit)
         self.reger_worker.finished.connect(self.reger_worker.deleteLater)
