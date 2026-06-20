@@ -1,22 +1,19 @@
 import ctypes
+import ctypes.wintypes
+import importlib
 import json
 import os
 import random
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import csv
+
 from datetime import datetime
 from glob import glob
 from pathlib import Path
-
-import websocket
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
@@ -46,17 +43,12 @@ LAST_NAMES = [
     "Smirnov", "Ivanov", "Petrov", "Sokolov", "Volkov", "Kuznetsov", "Popov",
     "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
 ]
-CDP_PORT = 9222
-PAGE_AUTOMATION_TIMEOUT = 45
+VISUAL_AUTOMATION_TIMEOUT = 60
 EDGE_INITIAL_CHECK_DELAY = 5
 EDGE_MONITOR_INTERVAL = 1
 EDGE_WINDOW_TITLE = "Microsoft Edge"
 EDGE_PROCESS_NAME = "msedge.exe"
 
-def get_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 def get_edge_popen_kwargs(stderr_target=None):
     kwargs = {
         "stdin": subprocess.DEVNULL,
@@ -151,26 +143,16 @@ def read_process_output(output_file):
     return text[-1200:]
 
 
-def build_edge_args(edge_path, port, user_data_dir):
+def build_edge_args(edge_path, user_data_dir):
     return [
         edge_path,
         "--inprivate",
-        f"--remote-debugging-port={port}",
-        "--remote-debugging-address=127.0.0.1",
-        "--remote-allow-origins=*",        
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
         TARGET_URL,
     ]
 
-
-def is_debugger_available(port):
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
-            return response.status == 200
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
 
 def get_window_titles():
     if os.name != "nt":
@@ -232,8 +214,6 @@ def wait_for_edge_pid(output_file, known_pids=None, launched_pid=None, timeout=E
         time.sleep(0.25)
 
 
-
- 
     details = read_process_output(output_file)
     message = (
         f'Процесс "{EDGE_PROCESS_NAME}" не найден в диспетчере задач за {timeout} сек. '
@@ -246,8 +226,8 @@ def wait_for_edge_pid(output_file, known_pids=None, launched_pid=None, timeout=E
     raise RuntimeError(message)
 
 
-def wait_until_edge_closed(port, edge_pid=None):
-    while (edge_pid and edge_pid in get_edge_process_ids()) or is_edge_window_open() or is_debugger_available(port):
+def wait_until_edge_closed(edge_pid=None):
+    while (edge_pid and edge_pid in get_edge_process_ids()) or is_edge_window_open():
         time.sleep(EDGE_MONITOR_INTERVAL)
 
 
@@ -258,225 +238,175 @@ def generate_outlook_email():
     return f"{first_name}_{last_name}{digits}@outlook.com"
 
 
-def wait_for_debugger(port, timeout=20, status_callback=None, output_file=None, process=None):
-    deadline = time.time() + timeout
-    version_url = f"http://127.0.0.1:{port}/json/version"
-    list_url = f"http://127.0.0.1:{port}/json/list"
-    new_tab_url = f"http://127.0.0.1:{port}/json/new?{urllib.parse.quote(TARGET_URL, safe=':/?=&')}"
-    target_host = urllib.parse.urlparse(TARGET_URL).netloc.lower()
-    last_error = ""
+def activate_edge_window(window_title=EDGE_WINDOW_TITLE):
+    if os.name != "nt":
+        return False
 
-    def remember_error(exc):
-        nonlocal last_error
-        last_error = str(exc)
+    expected_title = window_title.lower()
+    user32 = ctypes.windll.user32
+    found_hwnd = ctypes.c_void_p()
 
-    def process_exit_message():
-        if process is None:
-            return ""
-        exit_code = process.poll()
-        if exit_code is None:
-            return ""
-        return (
-            f" Стартовый процесс Microsoft Edge завершился с кодом {exit_code}, "
-            "но проверка DevTools продолжалась: Edge часто передаёт окно дочернему процессу."
+    def enum_handler(hwnd, _):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        if expected_title in buffer.value.lower():
+            found_hwnd.value = hwnd
+            return False
+        return True
+
+    enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    user32.EnumWindows(enum_windows_proc(enum_handler), 0)
+    if not found_hwnd.value:
+        return False
+
+    user32.ShowWindow(found_hwnd.value, 9)
+    user32.SetForegroundWindow(found_hwnd.value)
+    return True
+
+
+def get_foreground_window_rect():
+    if os.name != "nt":
+        return None
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    rect = ctypes.wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    return {"left": rect.left, "top": rect.top, "right": rect.right, "bottom": rect.bottom}
+
+
+def load_optional_module(module_name):
+    try:
+        return importlib.import_module(module_name)
+    except Exception:
+        return None
+
+
+def find_text_point_on_screen(pyautogui_module, pytesseract_module, words, confidence=45):
+    if pyautogui_module is None or pytesseract_module is None:
+        return None
+
+    screenshot = pyautogui_module.screenshot()
+    try:
+        data = pytesseract_module.image_to_data(
+            screenshot,
+            lang="rus+eng",
+            output_type=pytesseract_module.Output.DICT,
+            config="--psm 6",
         )
-        
-    def is_signup_tab(tab):
-        tab_url = (tab.get("url") or "").lower()
-        tab_title = (tab.get("title") or "").lower()
-        return target_host in tab_url or "signup" in tab_url or "учетн" in tab_title or "microsoft" in tab_title
+    except (pytesseract_module.TesseractNotFoundError, RuntimeError, OSError):
+        return None
 
-    def usable_tab(tab):
-        return tab.get("type") == "page" and tab.get("webSocketDebuggerUrl")
-
-    if status_callback:
-        status_callback(f"Start reger: жду DevTools на 127.0.0.1:{port}.")
-
-    while time.time() < deadline:
-
-
+    normalized_words = [word.lower() for word in words]
+    count = len(data.get("text", []))
+    for index in range(count):
+        text = (data["text"][index] or "").strip().lower()
+        if not text:
+            continue
         try:
-            with urllib.request.urlopen(version_url, timeout=1) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"/json/version вернул HTTP {response.status}")
-            with urllib.request.urlopen(list_url, timeout=1) as response:
-                tabs = json.loads(response.read().decode("utf-8"))
-
-            signup_tabs = [tab for tab in tabs if usable_tab(tab) and is_signup_tab(tab)]
-            if signup_tabs:
-                return signup_tabs[0]["webSocketDebuggerUrl"]
-
-            page_tabs = [tab for tab in tabs if usable_tab(tab)]
-            if page_tabs:
-                return page_tabs[0]["webSocketDebuggerUrl"]
-
-            try:
-                request = urllib.request.Request(new_tab_url, method="PUT")
-                response = urllib.request.urlopen(request, timeout=1)
-            except urllib.error.HTTPError:
-                response = urllib.request.urlopen(new_tab_url, timeout=1)
-
-            with response:
-                tab = json.loads(response.read().decode("utf-8"))
-            if usable_tab(tab):
-                return tab["webSocketDebuggerUrl"]
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
-            remember_error(exc)
-            time.sleep(0.4)
-
-    details = read_process_output(output_file) if output_file else ""
-    message = (
-        f"Не удалось подключиться к Microsoft Edge DevTools на 127.0.0.1:{port}."
-        " Поэтому автоматизация не может нажимать и вводить текст в открытом окне."
-        f"{process_exit_message()}"
-    )
-    if last_error:
-        message += f" Последняя ошибка DevTools: {last_error}."
-    if details:
-        message += f" Вывод Microsoft Edge: {details}"
-    raise RuntimeError(message)
-
-class CdpClient:
-    def __init__(self, ws_url):
-        self.ws = websocket.create_connection(ws_url, timeout=10)
-        self.next_id = 0
-
-    def call(self, method, params=None):
-        self.next_id += 1
-        message_id = self.next_id
-        self.ws.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
-
-        while True:
-            response = json.loads(self.ws.recv())
-            if response.get("id") == message_id:
-                if "error" in response:
-                    raise RuntimeError(response["error"].get("message", str(response["error"])))
-                return response.get("result", {})
-
-    def close(self):
-        self.ws.close()
+            item_confidence = float(data.get("conf", [0])[index])
+        except (TypeError, ValueError):
+            item_confidence = 0
+        if item_confidence < confidence:
+            continue
+        if any(word in text for word in normalized_words):
+            return {
+                "x": data["left"][index] + data["width"][index] / 2,
+                "y": data["top"][index] + data["height"][index] / 2,
+                "text": data["text"][index],
+            }
+    return None
 
 
-def automate_signup_page(port=CDP_PORT, status_callback=None, output_file=None, process=None):
+def fallback_point(pyautogui_module, relative_x, relative_y):
+    rect = get_foreground_window_rect()
+    if not rect:
+        width, height = pyautogui_module.size()
+        return {"x": width * relative_x, "y": height * relative_y}
+    return {
+        "x": rect["left"] + (rect["right"] - rect["left"]) * relative_x,
+        "y": rect["top"] + (rect["bottom"] - rect["top"]) * relative_y,
+    }
+
+
+def automate_signup_page(status_callback=None):
     email = generate_outlook_email()
-    if status_callback:
-        status_callback("Start reger: подключаюсь к вкладке регистрации Microsoft Edge.")
-    ws_url = wait_for_debugger(
-        port,
-        timeout=PAGE_AUTOMATION_TIMEOUT,
-        status_callback=status_callback,
-        output_file=output_file,
-        process=process,
-    )
-    cdp = CdpClient(ws_url)
 
     def log(message):
         if status_callback:
             status_callback(message)
 
-    def evaluate(expression, timeout=60000):
-        result = cdp.call("Runtime.evaluate", {
-            "expression": expression,
-            "awaitPromise": True,
-            "timeout": timeout,
-            "userGesture": True,
-            "returnByValue": True,
-        })
-        value = result.get("result", {}).get("value")
-        if isinstance(value, dict) and value.get("ok") is False:
-            raise RuntimeError(value.get("error", "Неизвестная ошибка автоматизации."))
-        return value
-
-    def mouse_click(point, label):
-        if not point:
-            raise RuntimeError(f"Не найдены координаты для клика: {label}.")
-        x = point["x"]
-        y = point["y"]
-        log(f"Start reger: кликаю мышкой по элементу «{label}» ({round(x)}, {round(y)}).")
-        cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "none"})
-        cdp.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
-        cdp.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
-        time.sleep(0.3)
-
-    locator_js = r'''
-        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        const visible = (el) => {
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-        };
-        const textOf = (el) => (el?.innerText || el?.textContent || el?.value || el?.getAttribute('aria-label') || el?.placeholder || '').trim();
-        const allElements = (root = document) => {
-            const result = [...root.querySelectorAll('*')];
-            for (const el of [...result]) {
-                if (el.shadowRoot) result.push(...allElements(el.shadowRoot));
-            }
-            return result;
-        };
-        const center = (el) => {
-            el.scrollIntoView({block: 'center', inline: 'center'});
-            const rect = el.getBoundingClientRect();
-            return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
-        };
-        const findEmailInput = () => allElements().filter(el => ['INPUT', 'TEXTAREA'].includes(el.tagName)).find(el => {
-            if (!visible(el) || el.disabled || el.readOnly) return false;
-            const meta = [el.type, el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.getAttribute('data-testid')].join(' ');
-            return /email|membername|login|электрон/i.test(meta) || textOf(el).includes('Электронная почта');
-        });
-        const findTitle = () => allElements().find(el => visible(el) && textOf(el).includes('Создание учетной записи Майкрософт'));
-        const findEmailLabelOrInput = () => allElements().find(el => visible(el) && textOf(el).includes('Электронная почта')) || findEmailInput();
-        const findNextButton = () => allElements().find(el => visible(el) && (/^(BUTTON|INPUT)$/.test(el.tagName) || el.getAttribute('role') === 'button') && /далее|next/i.test(textOf(el)));
-        const waitForPoint = async (kind, timeout = 45000) => {
-            const started = Date.now();
-            const finder = {title: findTitle, email: findEmailLabelOrInput, input: findEmailInput, next: findNextButton}[kind];
-            while (Date.now() - started < timeout) {
-                const el = finder();
-                if (el) return {ok: true, point: center(el)};
-                await sleep(250);
-            }
-            return {ok: false, error: `Не найден элемент: ${kind}.`};
-        };
-        window.__regerWaitForPoint = waitForPoint;
-        window.__regerSetEmail = async (email) => {
-            const input = findEmailInput();
-            if (!input) return {ok: false, error: 'Не найдено поле ввода электронной почты.'};
-            input.focus();
-            input.value = email;
-            input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: email}));
-            input.dispatchEvent(new Event('change', {bubbles: true}));
-            return {ok: true};
-        };
-    '''
-
-    try:
-        cdp.call("Runtime.enable")
-        cdp.call("Page.enable")
-        cdp.call("Page.bringToFront")
-        evaluate("new Promise(resolve => { if (document.readyState === 'complete') resolve(true); else window.addEventListener('load', () => resolve(true), {once: true}); })", timeout=45000)
-        log("Start reger: страница загружена, читаю HTML и ищу элементы как в DevTools/F12.")
-        html_info = evaluate("""(() => {
-            const html = document.documentElement.outerHTML || '';
-            const text = document.body?.innerText || '';
-            return {ok: true, htmlLength: html.length, hasEmail: /email|membername|электрон/i.test(html), hasNext: /next|далее/i.test(text + html)};
-        })()""", timeout=15000)
-        log(
-            "Start reger: HTML получен "
-            f"({html_info.get('htmlLength', 0)} символов), "
-            f"email={html_info.get('hasEmail')}, next={html_info.get('hasNext')}."
+    pyautogui = load_optional_module("pyautogui")
+    pytesseract = load_optional_module("pytesseract")
+    if pyautogui is None:
+        raise RuntimeError(
+            "Для визуальной автоматизации нужен пакет pyautogui и доступ к экрану. "
+            "Установите зависимости из requirements.txt и запускайте программу в обычной Windows-сессии."
         )
-        evaluate(locator_js)
-        mouse_click(evaluate("window.__regerWaitForPoint('title')").get("point"), "Создание учетной записи Майкрософт")
-        mouse_click(evaluate("window.__regerWaitForPoint('email', 30000)").get("point"), "Электронная почта")
-        mouse_click(evaluate("window.__regerWaitForPoint('input', 15000)").get("point"), "поле ввода электронной почты")
-        log(f"Start reger: ввожу сгенерированный email {email}.")
-        cdp.call("Input.insertText", {"text": email})
+    if pytesseract is None:
+        log("Start reger: pytesseract недоступен, включён резервный режим координат без OCR.")
+
+    log("Start reger: работаю без DevTools — анализирую видимое окно браузера и кликаю по координатам текста.")
+    pyautogui.PAUSE = 0.25
+
+    deadline = time.time() + VISUAL_AUTOMATION_TIMEOUT
+    while time.time() < deadline:
+        if activate_edge_window():
+            break
         time.sleep(0.5)
-        evaluate("window.__regerSetEmail(" + json.dumps(email) + ")", timeout=15000)
-        mouse_click(evaluate("window.__regerWaitForPoint('next', 30000)").get("point"), "Далее")
-        return email
-    finally:
-        cdp.close()
+    else:
+        raise RuntimeError(f'Не найдено открытое окно "{EDGE_WINDOW_TITLE}" для визуальной автоматизации.')
+
+    time.sleep(3)
+    pyautogui.hotkey("ctrl", "l")
+    pyautogui.write(TARGET_URL, interval=0.01)
+    pyautogui.press("enter")
+    log(f"Start reger: URL открыт напрямую: {TARGET_URL}.")
+    time.sleep(5)
+
+    title_point = None
+    email_point = None
+    next_point = None
+    while time.time() < deadline:
+        title_point = title_point or find_text_point_on_screen(pyautogui, pytesseract, ["создание", "account", "учет"])
+        email_point = email_point or find_text_point_on_screen(pyautogui, pytesseract, ["электрон", "email", "почта"])
+        next_point = next_point or find_text_point_on_screen(pyautogui, pytesseract, ["далее", "next"])
+        if email_point or next_point:
+            break
+        time.sleep(0.7)
+
+    if title_point:
+        log(f"Start reger: найден текст на экране «{title_point['text']}» ({round(title_point['x'])}, {round(title_point['y'])}).")
+
+    if email_point:
+        click_point = {"x": email_point["x"], "y": email_point["y"] + 36}
+        log(f"Start reger: кликаю по координатам поля email рядом с текстом «{email_point['text']}».")
+    else:
+        click_point = fallback_point(pyautogui, 0.50, 0.42)
+        log("Start reger: OCR не нашёл подпись email, использую координаты поля по области окна.")
+
+    pyautogui.click(click_point["x"], click_point["y"])
+    pyautogui.hotkey("ctrl", "a")
+    pyautogui.write(email, interval=0.01)
+    log(f"Start reger: ввожу сгенерированный email {email}.")
+    time.sleep(0.5)
+
+    next_point = next_point or find_text_point_on_screen(pyautogui, pytesseract, ["далее", "next"])
+    if next_point:
+        log(f"Start reger: кликаю по тексту кнопки «{next_point['text']}» ({round(next_point['x'])}, {round(next_point['y'])}).")
+        pyautogui.click(next_point["x"], next_point["y"])
+    else:
+        log("Start reger: OCR не нашёл кнопку Далее, нажимаю Enter как безопасный эквивалент.")
+        pyautogui.press("enter")
+
+    return email
 
 
 class EdgeFinder(QObject):
@@ -498,23 +428,22 @@ class RegerRunner(QObject):
         output_dir = tempfile.mkdtemp(prefix="reger-edge-")
         output_file = Path(output_dir) / "edge-startup.log"
         user_data_dir = Path(output_dir) / "profile"
-        port = get_free_port()
         process = None
 
         try:
             edge_pids_before_start = get_edge_process_ids()
             with open(output_file, "w", encoding="utf-8", errors="replace") as stderr_target:
                 process = subprocess.Popen(
-                    build_edge_args(self.edge_path, port, user_data_dir),
+                    build_edge_args(self.edge_path, user_data_dir),
                     **get_edge_popen_kwargs(stderr_target),
                 )
                 self.status.emit(f'Start reger: Microsoft Edge запущен в режиме InPrivate. Ищу PID "{EDGE_PROCESS_NAME}" через диспетчер задач.')
                 edge_pid = wait_for_edge_pid(output_file, edge_pids_before_start, process.pid)
 
             self.status.emit(f"Start reger: найден Microsoft Edge PID {edge_pid}. Продолжаю регистрацию в этом окне.")
-            email = automate_signup_page(port, self.status.emit, output_file, process)
+            email = automate_signup_page(self.status.emit)
             self.status.emit(f"Start reger: введена электронная почта {email} и нажата кнопка Далее.")
-            wait_until_edge_closed(port, edge_pid)
+            wait_until_edge_closed(edge_pid)
             self.finished.emit(True, f'Start reger: окно "{EDGE_WINDOW_TITLE}" закрыто.')
         except Exception as exc:
             if process and process.poll() is None:
