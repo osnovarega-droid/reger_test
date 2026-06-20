@@ -100,18 +100,32 @@ def is_debugger_available(port):
         return False
 
 def ensure_edge_started(process, output_file, port):
-    deadline = time.time() + EDGE_INITIAL_CHECK_DELAY
-    while time.time() < deadline:
+    initial_deadline = time.time() + EDGE_INITIAL_CHECK_DELAY
+    while time.time() < initial_deadline:
+        if is_debugger_available(port):
+            return True
         time.sleep(0.25)
 
-    if process.poll() is None or is_debugger_available(port):
+    if process.poll() is None:
         return True
+
+    # Edge on Windows can hand off the visible browser window to another process and
+    # finish the launcher process with exit code 0. In that case the window may be
+    # open already, so keep waiting for DevTools instead of reporting that Edge did
+    # not open.
+    startup_deadline = time.time() + max(0, EDGE_STARTUP_TIMEOUT - EDGE_INITIAL_CHECK_DELAY)
+    while time.time() < startup_deadline:
+        if is_debugger_available(port):
+            return True
+        time.sleep(0.25)
+
     exit_code = process.poll()
     details = read_process_output(output_file)
     message = (
-        f"Microsoft Edge не открыл окно InPrivate за {EDGE_INITIAL_CHECK_DELAY} сек. "
-        f"Стартовый процесс завершился с кодом {exit_code}, DevTools не отвечает. "
-        "Проверьте путь к msedge.exe."
+        f"Microsoft Edge запустил окно, но DevTools не ответил за {EDGE_STARTUP_TIMEOUT} сек. "
+        f"Стартовый процесс завершился с кодом {exit_code}. "
+        "Проверьте, что выбран именно msedge.exe и что политика/антивирус не блокирует "
+        "--remote-debugging-port."
     )
     if details:
         message += f" Вывод Microsoft Edge: {details}"
