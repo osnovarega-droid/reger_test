@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import csv
 from datetime import datetime
 from glob import glob
 from pathlib import Path
@@ -50,6 +51,7 @@ PAGE_AUTOMATION_TIMEOUT = 45
 EDGE_INITIAL_CHECK_DELAY = 5
 EDGE_MONITOR_INTERVAL = 1
 EDGE_WINDOW_TITLE = "Microsoft Edge"
+EDGE_PROCESS_NAME = "msedge.exe"
 
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -71,7 +73,74 @@ def get_edge_popen_kwargs(stderr_target=None):
         kwargs["startupinfo"] = startupinfo
 
     return kwargs
+def get_edge_process_ids():
+    if os.name != "nt":
+        return set()
 
+    try:
+        completed = subprocess.run(
+            [
+                "tasklist",
+                "/FI",
+                f"IMAGENAME eq {EDGE_PROCESS_NAME}",
+                "/FO",
+                "CSV",
+                "/NH",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+
+    if completed.returncode != 0:
+        return set()
+
+    process_ids = set()
+    for row in csv.reader(completed.stdout.splitlines()):
+        if len(row) < 2 or row[0].lower() != EDGE_PROCESS_NAME:
+            continue
+        try:
+            process_ids.add(int(row[1]))
+        except ValueError:
+            continue
+
+    return process_ids
+
+
+def get_window_process_ids(window_title=EDGE_WINDOW_TITLE):
+    if os.name != "nt":
+        return set()
+
+    expected_title = window_title.lower()
+    process_ids = set()
+    user32 = ctypes.windll.user32
+
+    def enum_handler(hwnd, _):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        title = buffer.value.strip()
+        if expected_title not in title.lower():
+            return True
+
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value:
+            process_ids.add(pid.value)
+        return True
+
+    enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    user32.EnumWindows(enum_windows_proc(enum_handler), 0)
+    return process_ids
 
 def read_process_output(output_file):
     try:
@@ -133,12 +202,31 @@ def is_edge_window_open(window_title=EDGE_WINDOW_TITLE):
     return any(expected_title in title.lower() for title in get_window_titles())
 
 
-def wait_for_edge_window(output_file, timeout=EDGE_INITIAL_CHECK_DELAY):
+def wait_for_edge_pid(output_file, known_pids=None, launched_pid=None, timeout=EDGE_INITIAL_CHECK_DELAY):
+    known_pids = known_pids or set()
     deadline = time.time() + timeout
+    last_seen_pids = set()
 
     while time.time() < deadline:
-        if is_edge_window_open():
-            return True
+        current_pids = get_edge_process_ids()
+        last_seen_pids = current_pids
+
+        if launched_pid and launched_pid in current_pids:
+            return launched_pid
+
+        new_pids = current_pids - known_pids
+        if new_pids:
+            window_pids = get_window_process_ids()
+            window_new_pids = sorted(new_pids & window_pids)
+            if window_new_pids:
+                return window_new_pids[0]
+            return sorted(new_pids)[0]
+
+        window_pids = get_window_process_ids()
+        reusable_pids = sorted(current_pids & window_pids)
+        if reusable_pids:
+            return reusable_pids[0]
+
         time.sleep(0.25)
 
 
@@ -146,16 +234,18 @@ def wait_for_edge_window(output_file, timeout=EDGE_INITIAL_CHECK_DELAY):
  
     details = read_process_output(output_file)
     message = (
-        f'Окно с названием "{EDGE_WINDOW_TITLE}" не найдено за {timeout} сек. '
-        "Проверка теперь выполняется по названию окна, а не по PID процесса."
+        f'Процесс "{EDGE_PROCESS_NAME}" не найден в диспетчере задач за {timeout} сек. '
+        "Start reger теперь привязывается к PID Microsoft Edge и работает с этим окном."
     )
+    if last_seen_pids:
+        message += f" Последние найденные PID: {', '.join(map(str, sorted(last_seen_pids)))}."
     if details:
         message += f" Вывод Microsoft Edge: {details}"
     raise RuntimeError(message)
 
 
-def wait_until_edge_closed(port):
-    while is_edge_window_open() or is_debugger_available(port):
+def wait_until_edge_closed(port, edge_pid=None):
+    while (edge_pid and edge_pid in get_edge_process_ids()) or is_edge_window_open() or is_debugger_available(port):
         time.sleep(EDGE_MONITOR_INTERVAL)
 
 
@@ -311,18 +401,19 @@ class RegerRunner(QObject):
         process = None
 
         try:
+            edge_pids_before_start = get_edge_process_ids()
             with open(output_file, "w", encoding="utf-8", errors="replace") as stderr_target:
                 process = subprocess.Popen(
                     build_edge_args(self.edge_path, port, user_data_dir),
                     **get_edge_popen_kwargs(stderr_target),
                 )
-                self.status.emit(f'Start reger: Microsoft Edge запущен в режиме InPrivate. Проверю окно "{EDGE_WINDOW_TITLE}" через {EDGE_INITIAL_CHECK_DELAY} сек.')
-                wait_for_edge_window(output_file)
+                self.status.emit(f'Start reger: Microsoft Edge запущен в режиме InPrivate. Ищу PID "{EDGE_PROCESS_NAME}" через диспетчер задач.')
+                edge_pid = wait_for_edge_pid(output_file, edge_pids_before_start, process.pid)
 
-            self.status.emit(f'Start reger: найдено окно "{EDGE_WINDOW_TITLE}". Продолжаю регистрацию.')
+            self.status.emit(f"Start reger: найден Microsoft Edge PID {edge_pid}. Продолжаю регистрацию в этом окне.")
             email = automate_signup_page(port)
             self.status.emit(f"Start reger: введена электронная почта {email} и нажата кнопка Далее.")
-            wait_until_edge_closed(port)
+            wait_until_edge_closed(port, edge_pid)
             self.finished.emit(True, f'Start reger: окно "{EDGE_WINDOW_TITLE}" закрыто.')
         except Exception as exc:
             if process and process.poll() is None:
