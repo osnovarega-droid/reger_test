@@ -259,6 +259,30 @@ def generate_outlook_email():
     last_name = random.choice(LAST_NAMES).lower()
     return f"{first_name}_{last_name}{digits}@outlook.com"
 
+def load_account_credentials():
+    accounts = []
+    if not LOGPASS_FILE.exists():
+        return accounts
+
+    try:
+        lines = LOGPASS_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return accounts
+
+    for line in lines:
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+
+        email, password = line.split(":", 1)
+        email = email.strip()
+        password = password.strip()
+        if email and password:
+            accounts.append((email, password))
+
+    return accounts
+
+
 def save_account_credentials(email, password):
     with open(LOGPASS_FILE, "a", encoding="utf-8") as file:
         file.write(f"{email}:{password}\n")
@@ -459,59 +483,26 @@ def click_text_or_fallback(pyautogui_module, pytesseract_module, words, fallback
     return point
 
 
-def click_random_birth_day(pyautogui_module, pytesseract_module, day_field_point, log):
-
-    candidates = []
-    if pytesseract_module is not None:
-        log("Start reger: после нажатия поля День делаю скриншот всего браузера и анализирую координаты цифр 1-18.")
-        for point in get_text_points_on_screen(pyautogui_module, pytesseract_module):
-            if not point["normalized"].isdigit():
-                continue
-            day_number = int(point["normalized"])
-            if day_number < BIRTH_DAY_MIN or day_number > BIRTH_DAY_MAX:
-                continue
-            if day_field_point and point["y"] <= day_field_point["y"] + 8:
-                continue
-            candidates.append({**point, "day": day_number})
-
-    if candidates:
-        candidates_by_day = {}
-        for candidate in sorted(candidates, key=lambda item: item["y"]):
-            candidates_by_day.setdefault(candidate["day"], candidate)
-        selected_day = random.choice(list(candidates_by_day.keys()))
-        point = candidates_by_day[selected_day]
-        log(
-            "Start reger: на скриншоте найдены дни "
-            f"{', '.join(map(str, sorted(candidates_by_day)))}; случайно выбран день {selected_day} "
-            f"с координатами ({int(point['x'])}, {int(point['y'])}). Делаю контрольный скриншот и нажимаю."
-        )
-        pyautogui_module.screenshot()
-    else:
-        selected_day = random.randint(BIRTH_DAY_MIN, BIRTH_DAY_MAX)        
-        if day_field_point:
-            point = {"x": day_field_point["x"], "y": day_field_point["y"] + 45 + (selected_day - 1) * 28}
-        else:
-            point = fallback_point(pyautogui_module, 0.36, 0.58)
-        log(
-            f"Start reger: цифры 1-18 через OCR не найдены, случайно выбран день {selected_day}; "
-            f"делаю контрольный скриншот и нажимаю резервные координаты ({int(point['x'])}, {int(point['y'])})."
-        )
-        pyautogui_module.screenshot()
-    pyautogui_module.moveTo(point["x"], point["y"], duration=0.2)
-    pyautogui_module.click(clicks=1)
-    return selected_day
+def select_dropdown_with_random_downs(pyautogui_module, field_name, log):
+    down_presses = random.randint(1, 10)
+    for _ in range(down_presses):
+        pyautogui_module.press("down")
+        time.sleep(0.05)
+    pyautogui_module.press("enter")
+    log(f"Start reger: поле {field_name} выбрано через {down_presses} случайных нажатий стрелки вниз и Enter.")
+    return down_presses
 
 
 def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
     time.sleep(2)
-    day_point = click_text_or_fallback(pyautogui_module, pytesseract_module, DAY_FIELD_WORDS, 0.37, 0.72, log, "День")
+    click_text_or_fallback(pyautogui_module, pytesseract_module, DAY_FIELD_WORDS, 0.37, 0.72, log, "День")
     time.sleep(1)
-    selected_day = click_random_birth_day(pyautogui_module, pytesseract_module, day_point, log)
+    selected_day_downs = select_dropdown_with_random_downs(pyautogui_module, "День", log)
 
     time.sleep(0.5)
     click_text_or_fallback(pyautogui_module, pytesseract_module, MONTH_FIELD_WORDS, 0.49, 0.72, log, "Месяц")
-    pyautogui_module.press("enter")
-    log("Start reger: поле Месяц нажато, затем нажата клавиша Enter для выбора месяца.")
+    time.sleep(0.5)
+    selected_month_downs = select_dropdown_with_random_downs(pyautogui_module, "Месяц", log)
 
     time.sleep(0.5)
     click_text_or_fallback(pyautogui_module, pytesseract_module, YEAR_FIELD_WORDS, 0.62, 0.72, log, "Год")
@@ -519,10 +510,10 @@ def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
     pyautogui_module.write(str(selected_year), interval=0.03)
     log(f"Start reger: в поле Год введён случайный год {selected_year}.")
 
-    log("Start reger: после ввода года прокручиваю страницу вниз 2 секунды перед поиском финальной синей кнопки.")
-    scroll_deadline = time.time() + 2
+    log("Start reger: после ввода года сильно прокручиваю страницу вниз 3 секунды перед поиском финальной синей кнопки.")
+    scroll_deadline = time.time() + 3
     while time.time() < scroll_deadline:
-        pyautogui_module.scroll(-5)
+        pyautogui_module.scroll(-10)
         time.sleep(0.1)
 
     time.sleep(0.5)
@@ -538,7 +529,11 @@ def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
         )
     pyautogui_module.moveTo(final_button_point["x"], final_button_point["y"], duration=0.2)
     pyautogui_module.click(clicks=1)
-    log(f"Start reger: дата рождения выбрана: день {selected_day}, год {selected_year}; финальная синяя кнопка нажата.")
+    log(
+        "Start reger: дата рождения выбрана: "
+        f"день после {selected_day_downs} нажатий вниз, месяц после {selected_month_downs} нажатий вниз, "
+        f"год {selected_year}; финальная синяя кнопка нажата."
+    )
 
 
 def is_microsoft_button_blue(red, green, blue):
@@ -935,7 +930,8 @@ class EdgeLauncher(QWidget):
         self.apply_style()
         self.switch_page(0)
         self.add_log("Интерфейс запущен.")
-
+        self.load_saved_accounts()
+        
     def create_nav_button(self, text, page_index):
         button = QPushButton(text)
         button.setObjectName("navButton")
@@ -1083,6 +1079,16 @@ class EdgeLauncher(QWidget):
     def add_log(self, message):
         self.logs_box.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
 
+    def load_saved_accounts(self):
+        accounts = load_account_credentials()
+        for email, password in accounts:
+            self.add_account_row(email, password, "—", True, False, False)
+
+        if accounts:
+            self.add_log(f"Загружено аккаунтов из {LOGPASS_FILE.name}: {len(accounts)}.")
+        else:
+            self.add_log(f"Сохранённые аккаунты в {LOGPASS_FILE.name} не найдены.")
+            
     def add_account_row(self, email, password, steam, email_ready=True, steam_ready=False, twofa_ready=False):
         row = self.accounts_table.rowCount()
         self.accounts_table.insertRow(row)
