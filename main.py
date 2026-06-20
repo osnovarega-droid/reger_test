@@ -46,7 +46,7 @@ LAST_NAMES = [
 ]
 CDP_PORT = 9222
 EDGE_STARTUP_TIMEOUT = 20
-EDGE_INITIAL_CHECK_DELAY = 2
+EDGE_INITIAL_CHECK_DELAY = 5
 EDGE_MONITOR_INTERVAL = 1
 
 def get_free_port():
@@ -80,24 +80,37 @@ def read_process_output(output_file):
     return text[-1200:]
 
 
-def build_edge_args(edge_path):
+def build_edge_args(edge_path, port, user_data_dir):
     return [
         edge_path,
         "--inprivate",
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={user_data_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
         TARGET_URL,
     ]
 
 
-def ensure_edge_started(process, output_file):
-    time.sleep(EDGE_INITIAL_CHECK_DELAY)
+def is_debugger_available(port):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
+            return response.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
 
-    exit_code = process.poll()
-    if exit_code is None:
+def ensure_edge_started(process, output_file, port):
+    deadline = time.time() + EDGE_INITIAL_CHECK_DELAY
+    while time.time() < deadline:
+        time.sleep(0.25)
+
+    if process.poll() is None or is_debugger_available(port):
         return True
-
+    exit_code = process.poll()
     details = read_process_output(output_file)
     message = (
-        f"Microsoft Edge завершился сразу после обычного запуска InPrivate с кодом {exit_code}. "
+        f"Microsoft Edge не открыл окно InPrivate за {EDGE_INITIAL_CHECK_DELAY} сек. "
+        f"Стартовый процесс завершился с кодом {exit_code}, DevTools не отвечает. "
         "Проверьте путь к msedge.exe."
     )
     if details:
@@ -105,8 +118,8 @@ def ensure_edge_started(process, output_file):
     raise RuntimeError(message)
 
 
-def wait_until_edge_closed(process):
-    while process.poll() is None:
+def wait_until_edge_closed(process, port):
+    while process.poll() is None or is_debugger_available(port):
         time.sleep(EDGE_MONITOR_INTERVAL)
 
 
@@ -203,7 +216,7 @@ def automate_signup_page(port=CDP_PORT):
             await sleep(1500);
             const microsoft = await waitUntil(() => [...document.querySelectorAll('div, span, img')].find(el => visible(el) && (el.innerText || el.alt || '').includes('Microsoft')));
             await clickCenter(microsoft);
-            const emailInput = await waitUntil(() => [...document.querySelectorAll('input')].find(el => visible(el) && (el.type === 'email' || /email|membername|login/i.test(el.name + ' ' + el.id + ' ' + el.placeholder + ' ' + el.getAttribute('aria-label')))));
+            const emailInput = await waitUntil(() => [...document.querySelectorAll('input')].find(el => visible(el) && (el.type === 'email' || /email|membername|login|электрон/i.test(el.name + ' ' + el.id + ' ' + el.placeholder + ' ' + el.getAttribute('aria-label')))));
             await clickCenter(emailInput);
             emailInput.focus();
             emailInput.value = '';
@@ -257,19 +270,23 @@ class RegerRunner(QObject):
     def run(self):
         output_dir = tempfile.mkdtemp(prefix="reger-edge-")
         output_file = Path(output_dir) / "edge-startup.log"
+        user_data_dir = Path(output_dir) / "profile"
+        port = get_free_port()
         process = None
 
         try:
             with open(output_file, "w", encoding="utf-8", errors="replace") as stderr_target:
                 process = subprocess.Popen(
-                    build_edge_args(self.edge_path),
+                    build_edge_args(self.edge_path, port, user_data_dir),
                     **get_edge_popen_kwargs(stderr_target),
                 )
                 self.status.emit(f"Start reger: Microsoft Edge запущен в режиме InPrivate, PID процесса: {process.pid}. Проверю окно через {EDGE_INITIAL_CHECK_DELAY} сек.")
-                ensure_edge_started(process, output_file)
+                ensure_edge_started(process, output_file, port)
 
-            self.status.emit(f"Start reger: окно Microsoft Edge InPrivate открыто, PID {process.pid} сохранён до закрытия окна.")
-            wait_until_edge_closed(process)
+            self.status.emit(f"Start reger: окно Microsoft Edge InPrivate открыто, PID {process.pid}. Продолжаю регистрацию.")
+            email = automate_signup_page(port)
+            self.status.emit(f"Start reger: введена электронная почта {email} и нажата кнопка Далее.")
+            wait_until_edge_closed(process, port)
             self.finished.emit(True, f"Start reger: окно Microsoft Edge закрыто или процесс PID {process.pid} пропал.")
         except Exception as exc:
             if process and process.poll() is None:
