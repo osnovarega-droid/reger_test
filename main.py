@@ -45,7 +45,7 @@ LAST_NAMES = [
     "Fedorov", "Morozov", "Orlov", "Lebedev", "Novikov", "Pavlov", "Egorov",
 ]
 CDP_PORT = 9222
-EDGE_STARTUP_TIMEOUT = 20
+PAGE_AUTOMATION_TIMEOUT = 45
 EDGE_INITIAL_CHECK_DELAY = 5
 EDGE_MONITOR_INTERVAL = 1
 
@@ -99,33 +99,20 @@ def is_debugger_available(port):
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
 
-def ensure_edge_started(process, output_file, port):
-    initial_deadline = time.time() + EDGE_INITIAL_CHECK_DELAY
-    while time.time() < initial_deadline:
-        if is_debugger_available(port):
-            return True
-        time.sleep(0.25)
+def ensure_edge_started(process, output_file):
+    time.sleep(EDGE_INITIAL_CHECK_DELAY)
 
     if process.poll() is None:
         return True
 
-    # Edge on Windows can hand off the visible browser window to another process and
-    # finish the launcher process with exit code 0. In that case the window may be
-    # open already, so keep waiting for DevTools instead of reporting that Edge did
-    # not open.
-    startup_deadline = time.time() + max(0, EDGE_STARTUP_TIMEOUT - EDGE_INITIAL_CHECK_DELAY)
-    while time.time() < startup_deadline:
-        if is_debugger_available(port):
-            return True
-        time.sleep(0.25)
+
 
     exit_code = process.poll()
     details = read_process_output(output_file)
     message = (
-        f"Microsoft Edge запустил окно, но DevTools не ответил за {EDGE_STARTUP_TIMEOUT} сек. "
-        f"Стартовый процесс завершился с кодом {exit_code}. "
-        "Проверьте, что выбран именно msedge.exe и что политика/антивирус не блокирует "
-        "--remote-debugging-port."
+        "Microsoft Edge не остался запущенным после "
+        f"{EDGE_INITIAL_CHECK_DELAY} сек. "
+        f"Стартовый процесс завершился с кодом {exit_code}."
     )
     if details:
         message += f" Вывод Microsoft Edge: {details}"
@@ -194,7 +181,7 @@ class CdpClient:
 
 def automate_signup_page(port=CDP_PORT):
     email = generate_outlook_email()
-    ws_url = wait_for_debugger(port)
+    ws_url = wait_for_debugger(port, timeout=PAGE_AUTOMATION_TIMEOUT)
     cdp = CdpClient(ws_url)
 
     js = """
@@ -226,7 +213,7 @@ def automate_signup_page(port=CDP_PORT):
         };
 
         (async () => {
-            await waitUntil(() => document.readyState === 'complete' || document.readyState === 'interactive');
+            await waitUntil(() => document.readyState === 'complete');
             await sleep(1500);
             const microsoft = await waitUntil(() => [...document.querySelectorAll('div, span, img')].find(el => visible(el) && (el.innerText || el.alt || '').includes('Microsoft')));
             await clickCenter(microsoft);
@@ -295,7 +282,7 @@ class RegerRunner(QObject):
                     **get_edge_popen_kwargs(stderr_target),
                 )
                 self.status.emit(f"Start reger: Microsoft Edge запущен в режиме InPrivate, PID процесса: {process.pid}. Проверю окно через {EDGE_INITIAL_CHECK_DELAY} сек.")
-                ensure_edge_started(process, output_file, port)
+                ensure_edge_started(process, output_file)
 
             self.status.emit(f"Start reger: окно Microsoft Edge InPrivate открыто, PID {process.pid}. Продолжаю регистрацию.")
             email = automate_signup_page(port)
