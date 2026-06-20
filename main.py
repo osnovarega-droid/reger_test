@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from glob import glob
@@ -141,15 +142,27 @@ def generate_outlook_email():
 
 def wait_for_debugger(port, timeout=20):
     deadline = time.time() + timeout
-    url = f"http://127.0.0.1:{port}/json/list"
+    list_url = f"http://127.0.0.1:{port}/json/list"
+    new_tab_url = f"http://127.0.0.1:{port}/json/new?{urllib.parse.quote(TARGET_URL, safe=':/?=&')}"
 
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1) as response:
+            with urllib.request.urlopen(list_url, timeout=1) as response:
                 tabs = json.loads(response.read().decode("utf-8"))
             for tab in tabs:
                 if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
                     return tab["webSocketDebuggerUrl"]
+
+            try:
+                request = urllib.request.Request(new_tab_url, method="PUT")
+                response = urllib.request.urlopen(request, timeout=1)
+            except urllib.error.HTTPError:
+                response = urllib.request.urlopen(new_tab_url, timeout=1)
+
+            with response:
+                tab = json.loads(response.read().decode("utf-8"))
+            if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
+                return tab["webSocketDebuggerUrl"]
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
             time.sleep(0.4)
 
@@ -308,6 +321,12 @@ class RegerRunner(QObject):
 
 def find_chromium_auto():
     possible_paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Chromium\Application\chrome.exe",
         r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
         r"%LOCALAPPDATA%\Chromium\Application\chrome.exe",
@@ -340,8 +359,8 @@ def find_chromium_auto():
                 file_text = str(file).lower()
 
                 if (
-                    file.name.lower() in ["chrome.exe", "chromium.exe"]
-                    and "chromium" in file_text
+                    file.name.lower() in ["chrome.exe", "chromium.exe", "msedge.exe"]
+                    and any(browser_name in file_text for browser_name in ["chrome", "chromium", "edge"])
                 ):
                     return str(file)
 
