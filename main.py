@@ -589,18 +589,7 @@ def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
         f"год {selected_year}; финальная синяя кнопка нажата."
     )
 
-    time.sleep(1)
-    log("Start reger: после синей кнопки ищу на скриншоте серую кнопку по цвету RGB (112,112,112) / #707070.")
-    gray_button_point = find_gray_button_point(pyautogui_module)
-    if gray_button_point:
-        log(
-            "Start reger: найден цвет серой кнопки #707070 "
-            f"({int(gray_button_point['x'])}, {int(gray_button_point['y'])}); нажимаю."
-        )
-        pyautogui_module.moveTo(gray_button_point["x"], gray_button_point["y"], duration=0.2)
-        pyautogui_module.click(clicks=1)
-    else:
-        log("Start reger: серый цвет #707070 на скриншоте не найден; продолжаю дальше по логике без резервного клика.")
+
 
 def fill_name_after_birth_date(pyautogui_module, email, log):
     first_name, last_name = get_display_names_from_email(email)
@@ -725,7 +714,7 @@ def find_colored_button_point(pyautogui_module, color_matcher, min_width=40, min
     return candidates[0]
 
 
-def find_gray_button_point(pyautogui_module):
+def find_target_gray_button_point(pyautogui_module):
     return find_colored_button_point(pyautogui_module, is_target_gray_button_color)
     
 
@@ -885,16 +874,17 @@ def is_privacy_notice_open(pyautogui_module):
 
 def click_gray_button_after_name(pyautogui_module, log):
     time.sleep(POST_NAME_GRAY_BUTTON_DELAY)
-    log("Start reger: через 2 секунды после синей кнопки делаю скриншот браузера и ищу серую кнопку.")
-    gray_button_point = find_gray_button_point(pyautogui_module)
+    log("Start reger: через 2 секунды после синей кнопки имени ищу серую кнопку по цвету RGB (112,112,112) / #707070.")
+    gray_button_point = find_target_gray_button_point(pyautogui_module)
+
     if not gray_button_point:
-        gray_button_point = fallback_point(pyautogui_module, 0.50, 0.73)
-        log("Start reger: серая кнопка на скриншоте не найдена, использую резервные координаты.")
-    else:
-        log(
-            "Start reger: на скриншоте найдена серая кнопка "
-            f"({int(gray_button_point['x'])}, {int(gray_button_point['y'])}); нажимаю."
-        )
+        log("Start reger: серый цвет #707070 на скриншоте после имени не найден; продолжаю дальше без резервного клика.")
+        return
+
+    log(
+        "Start reger: после ввода имени и фамилии найдена серая кнопка #707070 "
+        f"({int(gray_button_point['x'])}, {int(gray_button_point['y'])}); нажимаю."
+    )
     pyautogui_module.moveTo(gray_button_point["x"], gray_button_point["y"], duration=0.2)
     pyautogui_module.click(clicks=1)
 
