@@ -38,6 +38,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 LOGPASS_FILE = APP_DIR / "logpass.txt"
 TARGET_URL = "https://signup.live.com/signup"
+PRIVACY_NOTICE_URL = "https://privacynotice.account.microsoft.com/"
 
 
 FIRST_NAMES = [
@@ -54,7 +55,12 @@ PASSWORD_UPPERCASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 PASSWORD_LOWERCASE = "abcdefghijklmnopqrstuvwxyz"
 PASSWORD_DIGITS = "0123456789"
 VISUAL_AUTOMATION_TIMEOUT = 60
+POST_NAME_CHALLENGE_TIMEOUT = 240
+POST_NAME_GRAY_BUTTON_DELAY = 2
+POST_NAME_SCREENSHOT_INTERVAL = 3
 SIGNUP_TITLE_WORDS = ["создание", "создан", "учет", "учёт", "записи", "майкрософт", "microsoft", "account"]
+TRY_AGAIN_WORDS = ["попробуйте", "еще", "раз", "try", "again"]
+PRESS_AGAIN_WORDS = ["нажмите", "снова", "press", "again"]
 DAY_FIELD_WORDS = ["день", "day"]
 MONTH_FIELD_WORDS = ["месяц", "month"]
 YEAR_FIELD_WORDS = ["год", "year"]
@@ -62,6 +68,8 @@ BIRTH_DAY_MIN = 1
 BIRTH_DAY_MAX = 18
 BIRTH_YEAR_MIN = 1980
 BIRTH_YEAR_MAX = 2008
+GRAY_BUTTON_RGB = (112, 112, 112)
+GRAY_BUTTON_COLOR_TOLERANCE = 0
 
 EDGE_INITIAL_CHECK_DELAY = 5
 EDGE_MONITOR_INTERVAL = 1
@@ -470,6 +478,42 @@ def get_text_points_on_screen(pyautogui_module, pytesseract_module, confidence=3
         })
     return points
 
+def find_phrase_point_on_screen(pyautogui_module, pytesseract_module, words, confidence=35, max_gap=4):
+    points = get_text_points_on_screen(pyautogui_module, pytesseract_module, confidence)
+    if not points:
+        return None
+
+    normalized_words = [normalize_ocr_text(word) for word in words if normalize_ocr_text(word)]
+    if not normalized_words:
+        return None
+
+    full_text = " ".join(point["normalized"] for point in points)
+    if all(word in full_text for word in normalized_words):
+        matching_points = [
+            point for point in points
+            if any(word in point["normalized"] or point["normalized"] in word for word in normalized_words)
+        ]
+        if matching_points:
+            return {
+                "x": sum(point["x"] for point in matching_points) / len(matching_points),
+                "y": sum(point["y"] for point in matching_points) / len(matching_points),
+                "text": " ".join(point["text"] for point in matching_points),
+            }
+
+    for start_index in range(len(points)):
+        phrase_parts = []
+        phrase_points = []
+        for point in points[start_index:start_index + len(normalized_words) + max_gap]:
+            phrase_parts.append(point["normalized"])
+            phrase_points.append(point)
+            phrase_text = "".join(phrase_parts)
+            if all(word in phrase_text for word in normalized_words):
+                return {
+                    "x": sum(item["x"] for item in phrase_points) / len(phrase_points),
+                    "y": sum(item["y"] for item in phrase_points) / len(phrase_points),
+                    "text": " ".join(item["text"] for item in phrase_points),
+                }
+    return None
 
 def click_text_or_fallback(pyautogui_module, pytesseract_module, words, fallback_relative_x, fallback_relative_y, log, description):
     point = find_text_point_on_screen(pyautogui_module, pytesseract_module, words) if pytesseract_module is not None else None
@@ -542,6 +586,18 @@ def fill_birth_date_after_password(pyautogui_module, pytesseract_module, log):
         f"год {selected_year}; финальная синяя кнопка нажата."
     )
 
+    time.sleep(1)
+    log("Start reger: после синей кнопки ищу на скриншоте серую кнопку по цвету RGB (112,112,112) / #707070.")
+    gray_button_point = find_gray_button_point(pyautogui_module)
+    if gray_button_point:
+        log(
+            "Start reger: найден цвет серой кнопки #707070 "
+            f"({int(gray_button_point['x'])}, {int(gray_button_point['y'])}); нажимаю."
+        )
+        pyautogui_module.moveTo(gray_button_point["x"], gray_button_point["y"], duration=0.2)
+        pyautogui_module.click(clicks=1)
+    else:
+        log("Start reger: серый цвет #707070 на скриншоте не найден; продолжаю дальше по логике без резервного клика.")
 
 def fill_name_after_birth_date(pyautogui_module, email, log):
     first_name, last_name = get_display_names_from_email(email)
@@ -578,8 +634,16 @@ def fill_name_after_birth_date(pyautogui_module, email, log):
 def is_microsoft_button_blue(red, green, blue):
     return 0 <= red <= 45 and 90 <= green <= 170 and 160 <= blue <= 235 and blue > red + 110 and green > red + 60
 
+def is_target_gray_button_color(red, green, blue):
+    target_red, target_green, target_blue = GRAY_BUTTON_RGB
+    return (
+        abs(red - target_red) <= GRAY_BUTTON_COLOR_TOLERANCE
+        and abs(green - target_green) <= GRAY_BUTTON_COLOR_TOLERANCE
+        and abs(blue - target_blue) <= GRAY_BUTTON_COLOR_TOLERANCE
+    )
 
-def find_blue_button_point(pyautogui_module, min_width=120, min_height=28):
+
+def find_colored_button_point(pyautogui_module, color_matcher, min_width=40, min_height=18):
     screenshot = pyautogui_module.screenshot()
     width, height = screenshot.size
     rect = get_foreground_window_rect()
@@ -596,21 +660,21 @@ def find_blue_button_point(pyautogui_module, min_width=120, min_height=28):
     pixel_access = image.load()
     scan_width = right - left
     scan_height = bottom - top
-    blue_mask = bytearray(scan_width * scan_height)
+    color_mask = bytearray(scan_width * scan_height)
 
     for y in range(top, bottom):
         row_offset = (y - top) * scan_width
         for x in range(left, right):
             red, green, blue = pixel_access[x, y]
-            if is_microsoft_button_blue(red, green, blue):
-                blue_mask[row_offset + (x - left)] = 1
+            if color_matcher(red, green, blue):
+                color_mask[row_offset + (x - left)] = 1
 
-    visited = bytearray(len(blue_mask))
+    visited = bytearray(len(color_mask))
     candidates = []
     for local_y in range(scan_height):
         for local_x in range(scan_width):
             start_index = local_y * scan_width + local_x
-            if not blue_mask[start_index] or visited[start_index]:
+            if not color_mask[start_index] or visited[start_index]:
                 continue
 
             stack = [(local_x, local_y)]
@@ -636,7 +700,7 @@ def find_blue_button_point(pyautogui_module, min_width=120, min_height=28):
                     if next_x < 0 or next_x >= scan_width or next_y < 0 or next_y >= scan_height:
                         continue
                     next_index = next_y * scan_width + next_x
-                    if blue_mask[next_index] and not visited[next_index]:
+                    if color_mask[next_index] and not visited[next_index]:
                         visited[next_index] = 1
                         stack.append((next_x, next_y))
 
@@ -657,6 +721,115 @@ def find_blue_button_point(pyautogui_module, min_width=120, min_height=28):
     candidates.sort(key=lambda item: (item["area"], item["width"] * item["height"]), reverse=True)
     return candidates[0]
 
+
+def find_gray_button_point(pyautogui_module):
+    return find_colored_button_point(pyautogui_module, is_target_gray_button_color)
+    
+
+def is_microsoft_button_gray(red, green, blue):
+    return (
+        85 <= red <= 170
+        and 85 <= green <= 170
+        and 85 <= blue <= 170
+        and abs(red - green) <= 18
+        and abs(green - blue) <= 18
+        and abs(red - blue) <= 18
+    )
+
+
+def is_error_text_red(red, green, blue):
+    return red >= 150 and green <= 95 and blue <= 95 and red > green + 60 and red > blue + 60
+
+
+def find_colored_component_point(pyautogui_module, color_predicate, min_width=120, min_height=28):
+    screenshot = pyautogui_module.screenshot()
+    width, height = screenshot.size
+    rect = get_foreground_window_rect()
+
+    if rect:
+        left = max(0, min(width - 1, rect["left"]))
+        top = max(0, min(height - 1, rect["top"]))
+        right = max(left + 1, min(width, rect["right"]))
+        bottom = max(top + 1, min(height, rect["bottom"]))
+    else:
+        left, top, right, bottom = 0, 0, width, height
+
+    image = screenshot.convert("RGB")
+    pixel_access = image.load()
+    scan_width = right - left
+    scan_height = bottom - top
+    color_mask = bytearray(scan_width * scan_height)
+
+    for y in range(top, bottom):
+        row_offset = (y - top) * scan_width
+        for x in range(left, right):
+            red, green, blue = pixel_access[x, y]
+            if color_predicate(red, green, blue):
+                color_mask[row_offset + (x - left)] = 1
+
+    visited = bytearray(len(color_mask))
+    candidates = []
+    for local_y in range(scan_height):
+        for local_x in range(scan_width):
+            start_index = local_y * scan_width + local_x
+            if not color_mask[start_index] or visited[start_index]:
+                continue
+
+            stack = [(local_x, local_y)]
+            visited[start_index] = 1
+            min_x = max_x = local_x
+            min_y = max_y = local_y
+            area = 0
+
+            while stack:
+                current_x, current_y = stack.pop()
+                area += 1
+                min_x = min(min_x, current_x)
+                max_x = max(max_x, current_x)
+                min_y = min(min_y, current_y)
+                max_y = max(max_y, current_y)
+
+                for next_x, next_y in (
+                    (current_x + 1, current_y),
+                    (current_x - 1, current_y),
+                    (current_x, current_y + 1),
+                    (current_x, current_y - 1),
+                ):
+                    if next_x < 0 or next_x >= scan_width or next_y < 0 or next_y >= scan_height:
+                        continue
+                    next_index = next_y * scan_width + next_x
+                    if color_mask[next_index] and not visited[next_index]:
+                        visited[next_index] = 1
+                        stack.append((next_x, next_y))
+
+            component_width = max_x - min_x + 1
+            component_height = max_y - min_y + 1
+            if component_width >= min_width and component_height >= min_height:
+                candidates.append({
+                    "x": left + min_x + component_width / 2,
+                    "y": top + min_y + component_height / 2,
+                    "width": component_width,
+                    "height": component_height,
+                    "area": area,
+                })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item["area"], item["width"] * item["height"]), reverse=True)
+    return candidates[0]
+
+def find_blue_button_point(pyautogui_module, min_width=120, min_height=28):
+    return find_colored_component_point(pyautogui_module, is_microsoft_button_blue, min_width, min_height)
+
+
+def find_gray_button_point(pyautogui_module, min_width=80, min_height=26):
+    return find_colored_component_point(pyautogui_module, is_microsoft_button_gray, min_width, min_height)
+
+
+def find_red_text_point(pyautogui_module, min_width=20, min_height=6):
+    return find_colored_component_point(pyautogui_module, is_error_text_red, min_width, min_height)
+    
 def fallback_point(pyautogui_module, relative_x, relative_y):
     rect = get_foreground_window_rect()
     if not rect:
@@ -682,6 +855,97 @@ def copy_text_to_clipboard(text):
         raise RuntimeError("Не удалось получить системный буфер обмена для вставки email через Ctrl+V.")
     clipboard.setText(text)
 
+def get_clipboard_text():
+    clipboard = QApplication.clipboard()
+    if clipboard is None:
+        return ""
+    return clipboard.text() or ""
+
+
+def get_browser_url(pyautogui_module):
+    previous_clipboard_text = get_clipboard_text()
+    pyautogui_module.hotkey("ctrl", "l")
+    time.sleep(0.1)
+    pyautogui_module.hotkey("ctrl", "c")
+    time.sleep(0.1)
+    current_url = get_clipboard_text().strip()
+    if previous_clipboard_text != current_url:
+        copy_text_to_clipboard(previous_clipboard_text)
+    pyautogui_module.press("esc")
+    return current_url
+
+
+def is_privacy_notice_open(pyautogui_module):
+    current_url = get_browser_url(pyautogui_module)
+    return current_url.lower().startswith(PRIVACY_NOTICE_URL.lower()), current_url
+
+
+def click_gray_button_after_name(pyautogui_module, log):
+    time.sleep(POST_NAME_GRAY_BUTTON_DELAY)
+    log("Start reger: через 2 секунды после синей кнопки делаю скриншот браузера и ищу серую кнопку.")
+    gray_button_point = find_gray_button_point(pyautogui_module)
+    if not gray_button_point:
+        gray_button_point = fallback_point(pyautogui_module, 0.50, 0.73)
+        log("Start reger: серая кнопка на скриншоте не найдена, использую резервные координаты.")
+    else:
+        log(
+            "Start reger: на скриншоте найдена серая кнопка "
+            f"({int(gray_button_point['x'])}, {int(gray_button_point['y'])}); нажимаю."
+        )
+    pyautogui_module.moveTo(gray_button_point["x"], gray_button_point["y"], duration=0.2)
+    pyautogui_module.click(clicks=1)
+
+
+def handle_post_name_challenge(pyautogui_module, pytesseract_module, log):
+    click_gray_button_after_name(pyautogui_module, log)
+    deadline = time.time() + POST_NAME_CHALLENGE_TIMEOUT
+
+    while time.time() < deadline:
+        time.sleep(POST_NAME_SCREENSHOT_INTERVAL)
+        log('Start reger: прошло 3 секунды, делаю скриншот браузера и проверяю кнопку "Нажмите снова".')
+
+        privacy_open, current_url = is_privacy_notice_open(pyautogui_module)
+        if privacy_open:
+            log(f"Start reger: открыта целевая ссылка {current_url}.")
+            return True
+
+        press_again_point = None
+        if pytesseract_module is not None:
+            press_again_point = find_phrase_point_on_screen(pyautogui_module, pytesseract_module, PRESS_AGAIN_WORDS)
+        if not press_again_point:
+            continue
+
+        blue_button_point = find_blue_button_point(pyautogui_module)
+        click_point = blue_button_point or press_again_point
+        log(
+            'Start reger: найдена синяя кнопка с текстом "Нажмите снова"; '
+            f"нажимаю ({int(click_point['x'])}, {int(click_point['y'])})."
+        )
+        pyautogui_module.moveTo(click_point["x"], click_point["y"], duration=0.2)
+        pyautogui_module.click(clicks=1)
+
+        time.sleep(1)
+        log('Start reger: после нажатия "Нажмите снова" делаю скриншот и проверяю красный текст "Попробуйте еще раз".')
+        try_again_point = None
+        if pytesseract_module is not None:
+            try_again_point = find_phrase_point_on_screen(pyautogui_module, pytesseract_module, TRY_AGAIN_WORDS)
+        if not try_again_point:
+            try_again_point = find_red_text_point(pyautogui_module)
+
+        if try_again_point:
+            screenshot_path = APP_DIR / f"try_again_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            pyautogui_module.screenshot().save(screenshot_path)
+            log(
+                'Start reger: найден красный текст "Попробуйте еще раз"; '
+                f"скриншот сохранён в {screenshot_path.name}, заново нажимаю серую кнопку."
+            )
+            click_gray_button_after_name(pyautogui_module, log)
+
+    raise RuntimeError(
+        f'Не удалось дождаться открытия ссылки "{PRIVACY_NOTICE_URL}" '
+        f"за {POST_NAME_CHALLENGE_TIMEOUT} секунд после ввода имени и фамилии."
+    )
+    
 def automate_signup_page(status_callback=None, edge_pid=None):
 
 
@@ -788,7 +1052,7 @@ def automate_signup_page(status_callback=None, edge_pid=None):
 
     fill_birth_date_after_password(pyautogui, pytesseract, log)
     fill_name_after_birth_date(pyautogui, email, log)
-    
+    handle_post_name_challenge(pyautogui, pytesseract, log)    
     save_account_credentials(email, password)
     log(f"Start reger: аккаунт сохранён в {LOGPASS_FILE.name} в формате mail:password.")
     return email, password
