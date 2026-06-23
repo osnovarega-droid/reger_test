@@ -292,8 +292,11 @@ def load_account_credentials():
 
 
 def save_account_credentials(email, password):
+    LOGPASS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOGPASS_FILE, "a", encoding="utf-8") as file:
         file.write(f"{email}:{password}\n")
+        file.flush()
+        os.fsync(file.fileno())
 
 def generate_password():
     password_length = random.randint(PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH)
@@ -1049,12 +1052,12 @@ def automate_signup_page(status_callback=None, edge_pid=None):
     pyautogui.moveTo(password_next_button_point["x"], password_next_button_point["y"], duration=0.2)
     pyautogui.click(clicks=1)
     log("Start reger: кнопка после ввода пароля нажата по координатам синей кнопки.")
+    save_account_credentials(email, password)
+    log(f"Start reger: email и пароль сохранены в {LOGPASS_FILE.name} в формате mail:password сразу после ввода пароля.")
 
     fill_birth_date_after_password(pyautogui, pytesseract, log)
     fill_name_after_birth_date(pyautogui, email, log)
-    handle_post_name_challenge(pyautogui, pytesseract, log)    
-    save_account_credentials(email, password)
-    log(f"Start reger: аккаунт сохранён в {LOGPASS_FILE.name} в формате mail:password.")
+    handle_post_name_challenge(pyautogui, pytesseract, log)
     return email, password
 
 
